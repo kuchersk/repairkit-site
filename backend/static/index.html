@@ -545,6 +545,11 @@
     ]);
     wrap.appendChild(stats);
 
+    var resetCard = el('div', {class:'card row', style:'justify-content:space-between;border-color:var(--bad);'});
+    resetCard.appendChild(el('div', {}, [el('h2',{style:'margin:0;color:var(--bad);'},['Обнулить остатки']), el('div',{class:'muted small'},['Ставит остаток 0 у ВСЕХ позиций — используйте перед первой приёмкой на склад'])]));
+    resetCard.appendChild(el('button', {class:'btn bad', onclick:resetAllStock}, ['Обнулить всё']));
+    wrap.appendChild(resetCard);
+
     var uploadCard = el('div', {class:'card'});
     uploadCard.appendChild(el('h2', {}, ['Обновить номенклатуру']));
     uploadCard.appendChild(el('div', {class:'muted small', style:'margin-bottom:10px;'}, ['Загрузите выгрузку (xlsx/csv) с артикулом, названием и штрихкодом. Остаток по существующим позициям не изменится.']));
@@ -651,6 +656,15 @@
     var url = URL.createObjectURL(blob);
     var a = document.createElement('a'); a.href = url; a.download = filename; document.body.appendChild(a); a.click(); a.remove();
     setTimeout(function(){ URL.revokeObjectURL(url); }, 4000);
+  }
+
+  async function resetAllStock(){
+    if (!confirm('Точно обнулить остаток у ВСЕХ позиций номенклатуры? Это действие нельзя отменить.')) return;
+    try{
+      var res = await apiFetch('/api/items/reset-stock', { method:'POST' });
+      toast('Остатки обнулены: ' + res.count + ' позиций', 'ok');
+      refreshItems();
+    }catch(e){ toast('Не удалось обнулить остатки', 'bad'); }
   }
 
   async function addManualItem(name, article, sku, ozn, bc2, qtyRaw){

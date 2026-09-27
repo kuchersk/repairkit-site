@@ -225,6 +225,15 @@ def delete_item(sku: str, _: bool = Depends(check_key)):
     return {"deleted": sku}
 
 
+@app.post("/api/items/reset-stock")
+def reset_all_stock(_: bool = Depends(check_key)):
+    now = _now_iso()
+    with get_conn() as conn:
+        conn.execute("UPDATE items SET stock = 0, updated_at = ?", (now,))
+        count = conn.execute("SELECT COUNT(*) AS c FROM items").fetchone()["c"]
+    return {"reset": True, "count": count}
+
+
 # ---------------------------------------------------------------------------
 # Order batches endpoints
 # ---------------------------------------------------------------------------

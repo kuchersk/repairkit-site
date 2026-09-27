@@ -43,7 +43,7 @@
     --warn-bg:#332A18;
     --shadow: 0 1px 2px rgba(0,0,0,.3), 0 8px 24px rgba(0,0,0,.35);
   }
-  html,body{height:100%;}
+  html,body{height:100%; overscroll-behavior-y: contain;}
   * { box-sizing: border-box; }
   html { scroll-padding-top: env(safe-area-inset-top, 0px); }
   body{
@@ -228,6 +228,10 @@
   var barcodeIndex = new Map(); // normalized barcode -> sku
   var orderBatches = new Map(); // id -> {marketplace,fileName,uploadedAt,columns,rows,partOf,partIndex,partsTotal}
   var recentScans = [];         // client-side only, most recent first
+  var uploadBusy = false;       // true while a bulk upload loop is running (guards against accidental navigation)
+  window.addEventListener('beforeunload', function(e){
+    if (uploadBusy){ e.preventDefault(); e.returnValue = ''; }
+  });
   var currentTab = "scan";
   var camStream = null;
 
@@ -713,16 +717,21 @@
       toWrite.push({ sku: skuStr, article: article!=null?String(article).trim():'', name: name!=null?String(name).trim():'', barcodeOzn: ozn, barcode2: b2 });
     });
     var done=0, created=0, updated=0;
-    for (var i=0;i<toWrite.length;i++){
-      var r = toWrite[i];
-      var existed = items.has(r.sku);
-      try{
-        var it = await apiFetch('/api/items/' + encodeURIComponent(r.sku), { method:'PUT', body: JSON.stringify({ article:r.article, name:r.name, barcodeOzn:r.barcodeOzn, barcode2:r.barcode2, stock:0 }) });
-        indexItem(it);
-        if (existed) updated++; else created++;
-      }catch(e){}
-      done++;
-      if (done % 20 === 0) updateWizardProgress(done, toWrite.length);
+    uploadBusy = true;
+    try{
+      for (var i=0;i<toWrite.length;i++){
+        var r = toWrite[i];
+        var existed = items.has(r.sku);
+        try{
+          var it = await apiFetch('/api/items/' + encodeURIComponent(r.sku), { method:'PUT', body: JSON.stringify({ article:r.article, name:r.name, barcodeOzn:r.barcodeOzn, barcode2:r.barcode2, stock:0 }) });
+          indexItem(it);
+          if (existed) updated++; else created++;
+        }catch(e){}
+        done++;
+        if (done % 20 === 0) updateWizardProgress(done, toWrite.length);
+      }
+    } finally {
+      uploadBusy = false;
     }
     updateWizardProgress(done, toWrite.length, true);
     toast('Номенклатура обновлена: ' + updated + ' обновлено, ' + created + ' создано', 'ok');
@@ -786,16 +795,21 @@
     });
     var done=0, total=perSku.size;
     var skus = Array.from(perSku.keys());
-    for (var i=0;i<skus.length;i++){
-      var sku = skus[i];
-      var addQty = perSku.get(sku);
-      try{
-        var body = mode === 'replace' ? { stock: Math.max(0, addQty) } : { delta: addQty };
-        var it = await apiFetch('/api/items/' + encodeURIComponent(sku) + '/stock', { method:'POST', body: JSON.stringify(body) });
-        indexItem(it);
-      }catch(e){}
-      done++;
-      if (done % 15 === 0) updateWizardProgress(done, total);
+    uploadBusy = true;
+    try{
+      for (var i=0;i<skus.length;i++){
+        var sku = skus[i];
+        var addQty = perSku.get(sku);
+        try{
+          var body = mode === 'replace' ? { stock: Math.max(0, addQty) } : { delta: addQty };
+          var it = await apiFetch('/api/items/' + encodeURIComponent(sku) + '/stock', { method:'POST', body: JSON.stringify(body) });
+          indexItem(it);
+        }catch(e){}
+        done++;
+        if (done % 15 === 0) updateWizardProgress(done, total);
+      }
+    } finally {
+      uploadBusy = false;
     }
     updateWizardProgress(done, total, true);
     renderStockResult(document.getElementById('stockUploadWizard'), total, notFound);

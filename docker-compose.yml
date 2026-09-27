@@ -2,11 +2,9 @@ services:
   repairkit-sklad:
     build: ./backend
     restart: unless-stopped
-    ports:
-      - "8000:8000"
+    expose:
+      - "8000"
     environment:
-      # Set a real secret here before exposing this to the internet.
-      # Leave empty during local testing to disable the API key check.
       - APP_API_KEY=${APP_API_KEY:-}
     volumes:
       - repairkit_data:/app/data

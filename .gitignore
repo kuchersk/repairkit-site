@@ -1,0 +1,5 @@
+.env
+backend/data/repairkit.db
+backend/data/repairkit.db-*
+__pycache__/
+*.pyc

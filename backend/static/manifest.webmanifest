@@ -1,0 +1,9 @@
+{
+  "name": "Repairkit · Склад",
+  "short_name": "Repairkit",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#14161A",
+  "theme_color": "#14161A",
+  "icons": []
+}

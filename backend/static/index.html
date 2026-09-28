@@ -44,6 +44,18 @@
     --shadow: 0 1px 2px rgba(0,0,0,.3), 0 8px 24px rgba(0,0,0,.35);
   }
   html,body{height:100%; overscroll-behavior-y: contain;}
+  .loc-box{ border:1px dashed var(--border); border-radius:var(--radius-sm); padding:12px; margin-bottom:14px; background:var(--surface-2); }
+  .loc-head{ display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:8px; flex-wrap:wrap; }
+  .loc-label{ font-size:12.5px; font-weight:600; color:var(--muted); }
+  .loc-badge{ background:var(--accent); color:var(--accent-ink); font-weight:800; font-size:18px; padding:4px 12px; border-radius:8px; letter-spacing:.02em; }
+  .loc-row{ display:flex; gap:8px; }
+  .loc-row input{ flex:1; }
+  .loc-cell{ cursor:pointer; white-space:nowrap; }
+  .loc-cell:hover{ background:var(--surface-2); }
+  .loc-empty{ color:var(--muted); }
+  .loc-list-row{ display:flex; justify-content:space-between; gap:10px; padding:9px 4px; border-bottom:1px solid var(--border); cursor:pointer; }
+  .loc-list-row:last-child{ border-bottom:none; }
+  .loc-list-row:hover{ background:var(--surface-2); }
   .founder-photo{ display:none; }
   @media (min-width: 900px){
     body{ padding-left: 240px; }
@@ -238,6 +250,7 @@
   
   var items = new Map();        // sku -> {sku,article,name,barcode,stock,updatedAt}
   var barcodeIndex = new Map(); // normalized barcode -> sku
+  var articleIndex = new Map(); // lower-cased article -> sku
   var orderBatches = new Map(); // id -> {marketplace,fileName,uploadedAt,columns,rows,partOf,partIndex,partsTotal}
   var recentScans = [];         // client-side only, most recent first
   var uploadBusy = false;       // true while a bulk upload loop is running (guards against accidental navigation)
@@ -254,6 +267,7 @@
     var e = document.createElement(tag);
     attrs = attrs || {};
     for (var k in attrs){
+      if (attrs[k] == null || attrs[k] === false) continue;
       if (k === 'class') e.className = attrs[k];
       else if (k === 'html') e.innerHTML = attrs[k];
       else if (k.indexOf('on') === 0 && typeof attrs[k] === 'function') e.addEventListener(k.slice(2), attrs[k]);
@@ -270,6 +284,45 @@
     return String(raw).split(/[,;]/).map(function(s){ return s.trim(); }).filter(Boolean);
   }
   function nowIso(){ return new Date().toISOString(); }
+  var CYR2LAT = {'А':'A','В':'B','Е':'E','К':'K','М':'M','Н':'H','О':'O','Р':'P','С':'C','Т':'T','Х':'X','У':'Y'};
+  // normalises a storage location for comparison only (Cyrillic look-alikes -> Latin, dash variants, no spaces)
+  function normLoc(s){
+    return String(s==null?'':s).trim().toUpperCase().replace(/[–—−]/g,'-').replace(/\s+/g,'')
+      .replace(/[АВЕКМНОРСТХУ]/g, function(ch){ return CYR2LAT[ch]; });
+  }
+  function findByLocation(code){
+    var n = normLoc(code);
+    if (!n) return [];
+    return Array.from(items.values()).filter(function(i){ return i.location && normLoc(i.location) === n; });
+  }
+  // finds an item by barcode, SKU or article found in a spreadsheet cell
+  function lookupItemByCell(v){
+    if (v == null) return null;
+    var s = String(v).trim();
+    if (!s) return null;
+    var tokens = splitBarcodes(s);
+    if (!tokens.length) tokens = [s];
+    for (var t=0; t<tokens.length; t++){
+      var tok = tokens[t];
+      var sku = barcodeIndex.get(normBarcode(tok));
+      if (sku && items.has(sku)) return items.get(sku);
+      if (items.has(tok)) return items.get(tok);
+      var sk2 = articleIndex.get(tok.toLowerCase());
+      if (sk2 && items.has(sk2)) return items.get(sk2);
+    }
+    var sk3 = articleIndex.get(s.toLowerCase());
+    if (sk3 && items.has(sk3)) return items.get(sk3);
+    return null;
+  }
+  // true while the person is typing / a wizard is open — background refresh must not redraw the screen then
+  function userIsBusy(){
+    var a = document.activeElement;
+    if (a && a !== document.body && (a.tagName === 'INPUT' || a.tagName === 'SELECT' || a.tagName === 'TEXTAREA')){
+      if (a.id !== 'scanInput' || a.value) return true;
+    }
+    if (document.querySelector('.step-wizard')) return true;
+    return false;
+  }
   function safeId(s){ var v = String(s==null?'':s).trim().replace(/[^A-Za-z0-9_.~:@+-]/g,'-').slice(0,180); return v || ('X'+Date.now()); }
   function toast(msg, kind){
     var t = el('div', {class:'banner ' + (kind||'info'), style:'position:fixed;left:16px;right:16px;bottom:96px;z-index:40;box-shadow:var(--shadow);'}, [msg]);
@@ -293,7 +346,9 @@
     if (!res.ok){
       var text = '';
       try{ text = await res.text(); }catch(e){}
-      throw new Error('HTTP ' + res.status + ' ' + text);
+      var err = new Error('HTTP ' + res.status + ' ' + text);
+      err.status = res.status;
+      throw err;
     }
     if (res.status === 204) return null;
     return res.json();
@@ -309,39 +364,57 @@
   window.__setApiKey = setApiKey;
 
   /* ---------------- app init ---------------- */
+  var lastItemsSig = '';
+  var lastOrdersSig = '';
+  var intervalsStarted = false;
+
   async function initApp(){
     els.status.textContent = 'Загрузка…';
-    await refreshItems();
-    refreshOrders();
-    setInterval(function(){ if (!uploadBusy) refreshItems(); }, 15000);
-    setInterval(function(){ if (!uploadBusy && currentTab === 'orders') refreshOrders(); }, 20000);
+    await refreshItems(true);
+    refreshOrders(true);
+    if (!intervalsStarted){
+      intervalsStarted = true;
+      setInterval(function(){ if (!uploadBusy) refreshItems(false); }, 15000);
+      setInterval(function(){ if (!uploadBusy && currentTab === 'orders') refreshOrders(false); }, 20000);
+    }
   }
 
   function indexItem(it){
     items.set(it.sku, it);
     splitBarcodes(it.barcodeOzn).concat(splitBarcodes(it.barcode2)).forEach(function(b){ barcodeIndex.set(normBarcode(b), it.sku); });
+    var art = String(it.article || '').trim().toLowerCase();
+    if (art) articleIndex.set(art, it.sku);
   }
 
-  async function refreshItems(){
+  async function refreshItems(force){
     try{
       var list = await apiFetch('/api/items');
+      els.status.textContent = list.length ? 'Синхронизировано' : 'База пуста — загрузите номенклатуру';
+      els.badge.textContent = list.length ? (fmtInt(list.length) + ' позиций') : '';
+      var sig = list.length + '#' + list.map(function(i){ return i.sku + '|' + i.stock + '|' + (i.location||'') + '|' + (i.updatedAt||''); }).join(';');
+      if (!force && sig === lastItemsSig) return;
+      lastItemsSig = sig;
       items = new Map();
       barcodeIndex = new Map();
+      articleIndex = new Map();
       list.forEach(indexItem);
-      els.status.textContent = items.size ? 'Синхронизировано' : 'База пуста — загрузите номенклатуру';
-      els.badge.textContent = items.size ? (fmtInt(items.size) + ' позиций') : '';
-      render();
+      if (force || !userIsBusy()) render();
     }catch(e){
-      els.status.textContent = 'Нет соединения с сервером';
+      if (e && e.status === 401) els.status.textContent = 'Не задан или неверен ключ доступа — нажмите ⚙';
+      else if (e && e.status) els.status.textContent = 'Ошибка сервера (код ' + e.status + ')';
+      else els.status.textContent = 'Нет соединения с сервером';
     }
   }
 
-  async function refreshOrders(){
+  async function refreshOrders(force){
     try{
       var list = await apiFetch('/api/orders');
+      var sig = list.map(function(b){ return b.id; }).join(',');
+      if (!force && sig === lastOrdersSig) return;
+      lastOrdersSig = sig;
       orderBatches = new Map();
       list.forEach(function(b){ orderBatches.set(b.id, b); });
-      if (currentTab === 'orders') render();
+      if (currentTab === 'orders' && (force || !userIsBusy())) render();
     }catch(e){}
   }
 
@@ -358,10 +431,11 @@
     currentTab = b.getAttribute('data-tab');
     Array.prototype.forEach.call(document.querySelectorAll('#tabBar button'), function(x){ x.classList.toggle('active', x===b); });
     render();
+    if (currentTab === 'orders') refreshOrders(false);
   });
 
   /* ================= SCAN TAB ================= */
-  var scanState = { found:null, notFoundCode:null, qty:1 };
+  var scanState = { found:null, notFoundCode:null, qty:1, locationView:null };
 
   function renderScan(){
     els.main.innerHTML = '';
@@ -386,6 +460,8 @@
       resultCard.appendChild(renderFoundCard(scanState.found));
     } else if (scanState.notFoundCode){
       resultCard.appendChild(renderNotFoundCard(scanState.notFoundCode));
+    } else if (scanState.locationView){
+      resultCard.appendChild(renderLocationCard(scanState.locationView.code));
     } else {
       resultCard.appendChild(el('div', {class:'result-empty'}, [el('span',{class:'big-ic'},['🔦']), 'Отсканируйте товар — карточка появится здесь']));
     }
@@ -427,6 +503,26 @@
       el('span', {class:'m'}, ['ШК OZN: ', el('b',{},[item.barcodeOzn||'—'])]),
       el('span', {class:'m'}, ['ШК 2...: ', el('b',{},[item.barcode2||'—'])])
     ]));
+    var locBox = el('div', {class:'loc-box'});
+    var locHead = el('div', {class:'loc-head'}, [el('span', {class:'loc-label'}, ['📍 Место хранения'])]);
+    if (item.location) locHead.appendChild(el('span', {class:'loc-badge mono'}, [item.location]));
+    else locHead.appendChild(el('span', {class:'muted small'}, ['не указано']));
+    locBox.appendChild(locHead);
+    var locRow = el('div', {class:'loc-row'});
+    var locInput = el('input', {type:'text', id:'locInput', class:'mono', autocomplete:'off',
+      placeholder: item.location ? 'Новое место…' : 'Введите или отсканируйте этикетку ячейки'});
+    locInput.addEventListener('keydown', function(e){
+      if (e.key === 'Enter'){ e.preventDefault(); saveLocation(item.sku, locInput.value); }
+    });
+    locRow.appendChild(locInput);
+    locRow.appendChild(el('button', {class:'btn', onclick:function(){ saveLocation(item.sku, locInput.value); }}, ['Сохранить']));
+    locBox.appendChild(locRow);
+    if (item.location){
+      locBox.appendChild(el('button', {class:'btn small', style:'margin-top:8px;', onclick:function(){
+        if (confirm('Убрать место хранения у этой позиции?')) patchLocation(item.sku, '');
+      }}, ['Убрать место']));
+    }
+    box.appendChild(locBox);
     box.appendChild(el('div', {class:'stock-pill' + (item.stock<=0?' zero':'')}, [
       el('span', {class:'num'}, [fmtInt(item.stock)]), el('span',{class:'muted small'},['на остатке'])
     ]));
@@ -450,8 +546,9 @@
     box.appendChild(el('div', {class:'muted small barcode-text', style:'margin-bottom:14px;'}, [code]));
     var nameInput = el('input', {type:'text', placeholder:'Название товара', id:'nfName', style:'margin-bottom:8px;'});
     var artInput = el('input', {type:'text', placeholder:'Артикул (необязательно)', id:'nfArt', style:'margin-bottom:8px;'});
+    var locInputNf = el('input', {type:'text', placeholder:'Место хранения (необязательно)', id:'nfLoc', class:'mono', style:'margin-bottom:8px;'});
     var qtyInput = el('input', {type:'number', min:'1', value:'1', id:'nfQty', style:'margin-bottom:12px;'});
-    box.appendChild(nameInput); box.appendChild(artInput);
+    box.appendChild(nameInput); box.appendChild(artInput); box.appendChild(locInputNf);
     box.appendChild(el('label',{style:'display:block;text-align:left;margin-bottom:4px;'},['Начальный остаток']));
     box.appendChild(qtyInput);
     box.appendChild(el('button', {class:'btn primary big', style:'width:100%;', onclick:function(){ createNewItem(code); }}, ['Создать позицию']));
@@ -462,15 +559,60 @@
     var code = normBarcode(raw);
     if (!code) return;
     var sku = barcodeIndex.get(code);
+    scanState.locationView = null;
     if (sku && items.has(sku)){
       scanState.found = items.get(sku);
       scanState.notFoundCode = null;
+    } else if (findByLocation(raw).length){
+      // not an item barcode, but a known storage location label: show what lies there
+      scanState.found = null;
+      scanState.notFoundCode = null;
+      scanState.locationView = { code: String(raw).trim() };
     } else {
       scanState.found = null;
       scanState.notFoundCode = code;
     }
     scanState.qty = 1;
     render();
+  }
+
+  function renderLocationCard(code){
+    var list = findByLocation(code).sort(function(a,b){ return (a.name||'').localeCompare(b.name||'', 'ru'); });
+    var box = el('div', {});
+    box.appendChild(el('div', {class:'name'}, ['📍 Место ', el('span', {class:'loc-badge mono'}, [code])]));
+    box.appendChild(el('div', {class:'muted small', style:'margin:8px 0 10px;'}, ['Позиций в этом месте: ' + list.length + '. Нажмите на позицию, чтобы открыть карточку.']));
+    list.forEach(function(it){
+      box.appendChild(el('div', {class:'loc-list-row', onclick:function(){
+        scanState.found = items.get(it.sku) || it; scanState.locationView = null; scanState.qty = 1; render();
+      }}, [
+        el('span', {}, [it.name || it.sku]),
+        el('span', {class:'mono', style:'font-weight:700;'}, [fmtInt(it.stock)])
+      ]));
+    });
+    return box;
+  }
+
+  async function saveLocation(sku, value){
+    var v = String(value == null ? '' : value).trim();
+    if (!v){ toast('Введите место хранения', 'bad'); return; }
+    if (barcodeIndex.has(normBarcode(v)) && !confirm('«' + v + '» похоже на штрихкод товара, а не на место хранения. Всё равно сохранить как место?')) return;
+    await patchLocation(sku, v);
+  }
+
+  async function patchLocation(sku, v){
+    try{
+      var it = await apiFetch('/api/items/' + encodeURIComponent(sku), { method:'PATCH', body: JSON.stringify({ location: v }) });
+      indexItem(it);
+      if (scanState.found && scanState.found.sku === sku) scanState.found = it;
+      toast(v ? ('Место сохранено: ' + v) : 'Место убрано', 'ok');
+      render();
+    }catch(e){ toast('Не удалось сохранить место', 'bad'); }
+  }
+
+  function editLocationPrompt(it){
+    var v = prompt('Место хранения для «' + (it.name || it.sku) + '».\nОставьте пустым, чтобы убрать место:', it.location || '');
+    if (v === null) return;
+    patchLocation(it.sku, v.trim());
   }
 
   async function applyDelta(sku, delta){
@@ -491,11 +633,13 @@
     var name = document.getElementById('nfName').value.trim();
     var art = document.getElementById('nfArt').value.trim();
     var qty = Math.max(0, parseInt(document.getElementById('nfQty').value)||0);
+    var nfLocEl = document.getElementById('nfLoc');
+    var newLoc = nfLocEl ? nfLocEl.value.trim() : '';
     if (!name){ toast('Укажите название товара', 'bad'); return; }
     var sku = safeId('NEW-' + code);
     var isOzn = code.toUpperCase().indexOf('OZN')===0;
     try{
-      var it = await apiFetch('/api/items/' + encodeURIComponent(sku), { method:'PUT', body: JSON.stringify({ article: art, name: name, barcodeOzn: isOzn?code:'', barcode2: isOzn?'':code, stock: qty }) });
+      var it = await apiFetch('/api/items/' + encodeURIComponent(sku), { method:'PUT', body: JSON.stringify({ article: art, name: name, barcodeOzn: isOzn?code:'', barcode2: isOzn?'':code, stock: qty, location: newLoc }) });
       indexItem(it);
       recentScans.unshift({ name: name, barcode: code, delta: qty });
       toast('Позиция создана', 'ok');
@@ -547,6 +691,7 @@
 
   /* ================= NOMENCLATURE TAB ================= */
   var nomenSearch = '';
+  var nomenLocFilter = '';
   function renderNomen(){
     els.main.innerHTML = '';
     var wrap = el('div', {class:'col'});
@@ -554,10 +699,12 @@
     var all = Array.from(items.values());
     var zero = all.filter(function(i){ return i.stock<=0; }).length;
     var totalUnits = all.reduce(function(a,i){ return a+i.stock; }, 0);
+    var noLoc = all.filter(function(i){ return !i.location; }).length;
     var stats = el('div', {class:'stats-row'}, [
       el('div', {class:'stat'}, [el('div',{class:'lbl'},['Позиций']), el('div',{class:'stat-num'},[fmtInt(all.length)])]),
       el('div', {class:'stat'}, [el('div',{class:'lbl'},['Нулевой остаток']), el('div',{class:'stat-num'},[fmtInt(zero)])]),
-      el('div', {class:'stat'}, [el('div',{class:'lbl'},['Всего единиц']), el('div',{class:'stat-num'},[fmtInt(totalUnits)])])
+      el('div', {class:'stat'}, [el('div',{class:'lbl'},['Всего единиц']), el('div',{class:'stat-num'},[fmtInt(totalUnits)])]),
+      el('div', {class:'stat'}, [el('div',{class:'lbl'},['Без места хранения']), el('div',{class:'stat-num'},[fmtInt(noLoc)])])
     ]);
     wrap.appendChild(stats);
 
@@ -574,6 +721,15 @@
     uploadCard.appendChild(fileInput);
     uploadCard.appendChild(el('div', {id:'nomenUploadWizard'}));
     wrap.appendChild(uploadCard);
+
+    var locCard = el('div', {class:'card'});
+    locCard.appendChild(el('h2', {}, ['Загрузить места хранения']));
+    locCard.appendChild(el('div', {class:'muted small', style:'margin-bottom:10px;'}, ['Файл (xlsx/csv) со столбцом товара (штрихкод, SKU или артикул) и столбцом места. Строки без места пропускаются, прежние места перезаписываются.']));
+    var locFile = el('input', {type:'file', accept:'.xlsx,.xls,.csv'});
+    locFile.addEventListener('change', function(e){ if (e.target.files[0]) startLocationsUpload(e.target.files[0]); });
+    locCard.appendChild(locFile);
+    locCard.appendChild(el('div', {id:'locUploadWizard'}));
+    wrap.appendChild(locCard);
 
     var exportCard = el('div', {class:'card row', style:'justify-content:space-between;'});
     exportCard.appendChild(el('div', {}, [el('h2',{style:'margin:0;'},['Экспорт']), el('div',{class:'muted small'},['Текущая номенклатура и остатки в Excel'])]));
@@ -592,11 +748,12 @@
     var addSku = el('input', {type:'text', placeholder:'SKU (необязательно — сгенерируем сами)', style:'margin-bottom:8px;'});
     var addOzn = el('input', {type:'text', placeholder:'Штрихкод OZN (необязательно)', class:'mono', style:'margin-bottom:8px;'});
     var addBc2 = el('input', {type:'text', placeholder:'Штрихкод 2... (необязательно)', class:'mono', style:'margin-bottom:8px;'});
+    var addLoc = el('input', {type:'text', placeholder:'Место хранения (необязательно)', class:'mono', style:'margin-bottom:8px;'});
     var addQty = el('input', {type:'number', min:'0', value:'0', placeholder:'Начальный остаток', style:'margin-bottom:10px;'});
     addCard.appendChild(addName); addCard.appendChild(addArt); addCard.appendChild(addSku);
-    addCard.appendChild(addOzn); addCard.appendChild(addBc2); addCard.appendChild(addQty);
+    addCard.appendChild(addOzn); addCard.appendChild(addBc2); addCard.appendChild(addLoc); addCard.appendChild(addQty);
     addCard.appendChild(el('button', {class:'btn primary', style:'width:100%;', onclick:function(){
-      addManualItem(addName.value.trim(), addArt.value.trim(), addSku.value.trim(), addOzn.value.trim(), addBc2.value.trim(), addQty.value);
+      addManualItem(addName.value.trim(), addArt.value.trim(), addSku.value.trim(), addOzn.value.trim(), addBc2.value.trim(), addQty.value, addLoc.value.trim());
     }}, ['Добавить позицию']));
     wrap.appendChild(addCard);
 
@@ -605,6 +762,12 @@
     var search = el('input', {type:'search', placeholder:'Поиск по названию, артикулу, SKU, штрихкоду…', value: nomenSearch, style:'margin-bottom:10px;'});
     search.addEventListener('input', function(){ nomenSearch = this.value; renderNomenTable(tblHolder); });
     tableCard.appendChild(search);
+    var locFilter = el('select', {style:'margin-bottom:10px;'});
+    [['', 'Все позиции'], ['none', 'Без места хранения'], ['has', 'С местом хранения']].forEach(function(o){
+      locFilter.appendChild(el('option', {value:o[0], selected: o[0] === nomenLocFilter ? 'selected' : null}, [o[1]]));
+    });
+    locFilter.addEventListener('change', function(){ nomenLocFilter = this.value; renderNomenTable(tblHolder); });
+    tableCard.appendChild(locFilter);
     var tblHolder = el('div', {});
     tableCard.appendChild(tblHolder);
     wrap.appendChild(tableCard);
@@ -620,14 +783,16 @@
       all = all.filter(function(i){
         return (i.name||'').toLowerCase().indexOf(q)>=0 || (i.article||'').toLowerCase().indexOf(q)>=0 ||
                (i.sku||'').toLowerCase().indexOf(q)>=0 || (i.barcodeOzn||'').toLowerCase().indexOf(q)>=0 ||
-               (i.barcode2||'').toLowerCase().indexOf(q)>=0;
+               (i.barcode2||'').toLowerCase().indexOf(q)>=0 || (i.location||'').toLowerCase().indexOf(q)>=0;
       });
     }
+    if (nomenLocFilter === 'none') all = all.filter(function(i){ return !i.location; });
+    else if (nomenLocFilter === 'has') all = all.filter(function(i){ return !!i.location; });
     all.sort(function(a,b){ return (a.name||'').localeCompare(b.name||'', 'ru'); });
     var shown = all.slice(0, 400);
     var wrap = el('div', {class:'tbl-scroll'});
     var table = el('table', {class:'data'});
-    table.appendChild(el('thead', {}, [el('tr', {}, ['Название','Артикул','SKU','ШК OZN','ШК 2...','Остаток'].map(function(h,i){ return el('th', {}, [h]); }))]));
+    table.appendChild(el('thead', {}, [el('tr', {}, ['Название','Артикул','SKU','ШК OZN','ШК 2...','Место','Остаток'].map(function(h,i){ return el('th', {}, [h]); }))]));
     var tbody = el('tbody');
     shown.forEach(function(i){
       tbody.appendChild(el('tr', {}, [
@@ -636,6 +801,11 @@
         el('td', {class:'mono'}, [i.sku]),
         el('td', {class:'mono'}, [i.barcodeOzn||'—']),
         el('td', {class:'mono'}, [i.barcode2||'—']),
+        (function(){
+          var c = el('td', {class:'mono loc-cell' + (i.location ? '' : ' loc-empty'), title:'Нажмите, чтобы изменить место'}, [i.location || '—']);
+          c.addEventListener('click', function(){ editLocationPrompt(i); });
+          return c;
+        })(),
         el('td', {class:'num-cell' + (i.stock<=0?' zero-cell':'')}, [fmtInt(i.stock)])
       ]));
     });
@@ -648,7 +818,7 @@
 
   async function exportNomenclature(){
     var all = Array.from(items.values()).sort(function(a,b){ return (a.name||'').localeCompare(b.name||'','ru'); });
-    var rows = all.map(function(i){ return { 'SKU': i.sku, 'Артикул': i.article, 'Наименование': i.name, 'Штрихкод OZN': i.barcodeOzn, 'Штрихкод 2...': i.barcode2, 'Остаток': i.stock }; });
+    var rows = all.map(function(i){ return { 'SKU': i.sku, 'Артикул': i.article, 'Наименование': i.name, 'Штрихкод OZN': i.barcodeOzn, 'Штрихкод 2...': i.barcode2, 'Место хранения': i.location, 'Остаток': i.stock }; });
     var ws = XLSX.utils.json_to_sheet(rows);
     var wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, 'Номенклатура');
@@ -679,17 +849,17 @@
     try{
       var res = await apiFetch('/api/items/reset-stock', { method:'POST' });
       toast('Остатки обнулены: ' + res.count + ' позиций', 'ok');
-      refreshItems();
+      refreshItems(true);
     }catch(e){ toast('Не удалось обнулить остатки', 'bad'); }
   }
 
-  async function addManualItem(name, article, sku, ozn, bc2, qtyRaw){
+  async function addManualItem(name, article, sku, ozn, bc2, qtyRaw, location){
     if (!name){ toast('Укажите название товара', 'bad'); return; }
     var qty = Math.max(0, parseInt(qtyRaw)||0);
     var finalSku = sku ? safeId(sku) : safeId((article ? 'ART-'+article : 'ITEM-'+Date.now()));
     if (items.has(finalSku)){ toast('SKU уже существует: ' + finalSku, 'bad'); return; }
     try{
-      var it = await apiFetch('/api/items/' + encodeURIComponent(finalSku), { method:'PUT', body: JSON.stringify({ article: article, name: name, barcodeOzn: ozn, barcode2: bc2, stock: qty }) });
+      var it = await apiFetch('/api/items/' + encodeURIComponent(finalSku), { method:'PUT', body: JSON.stringify({ article: article, name: name, barcodeOzn: ozn, barcode2: bc2, stock: qty, location: location || '' }) });
       indexItem(it);
       toast('Позиция добавлена', 'ok');
       renderNomen();
@@ -747,6 +917,67 @@
     }
     updateWizardProgress(done, toWrite.length, true);
     toast('Номенклатура обновлена: ' + updated + ' обновлено, ' + created + ' создано', 'ok');
+  }
+
+  /* ---- bulk storage locations upload ---- */
+  function startLocationsUpload(file){
+    readWorkbook(file, function(wb, sheetNames){
+      renderUploadWizard(document.getElementById('locUploadWizard'), wb, sheetNames, {
+        fields: [ {key:'id', label:'Товар: штрихкод, SKU или артикул', guess:['штрихкод','шк','barcode','sku','артикул']},
+                  {key:'location', label:'Место хранения', guess:['место','ячейка','location','адрес','полка']} ],
+        onApply: applyLocationsUpload
+      });
+    });
+  }
+
+  async function applyLocationsUpload(mapping, dataRows){
+    if (mapping.id == null || mapping.location == null){ toast('Выберите столбец товара и столбец места', 'bad'); return; }
+    var perSku = new Map();
+    var notFound = [];
+    dataRows.forEach(function(row){
+      var ident = row[mapping.id];
+      var loc = row[mapping.location];
+      if (ident == null) return;
+      var locStr = loc == null ? '' : String(loc).trim();
+      if (!locStr) return;
+      var it = lookupItemByCell(ident);
+      if (it) perSku.set(it.sku, locStr); else notFound.push({ ident: String(ident), loc: locStr });
+    });
+    var rows = Array.from(perSku.entries()).map(function(e){ return { sku: e[0], location: e[1] }; });
+    var total = rows.length, done = 0;
+    uploadBusy = true;
+    try{
+      for (var i=0; i<rows.length; i+=500){
+        var chunk = rows.slice(i, i+500);
+        await apiFetch('/api/items/locations', { method:'POST', body: JSON.stringify({ rows: chunk }) });
+        done += chunk.length;
+        updateWizardProgress(done, total);
+      }
+    }catch(e){
+      toast('Ошибка сохранения мест', 'bad');
+      return;
+    } finally {
+      uploadBusy = false;
+    }
+    perSku.forEach(function(loc, sku){ var it = items.get(sku); if (it) it.location = loc; });
+    updateWizardProgress(done, total, true);
+    renderLocationsResult(document.getElementById('locUploadWizard'), total, notFound);
+  }
+
+  function renderLocationsResult(container, matched, notFound){
+    var box = el('div', {class:'card', style:'margin-top:12px;'});
+    box.appendChild(el('div', {class:'banner ok'}, ['Мест записано: ' + matched]));
+    if (notFound.length){
+      box.appendChild(el('div', {class:'banner warn', style:'margin-top:8px;'}, ['Не найдено в номенклатуре: ' + notFound.length + ' строк']));
+      var wrap = el('div', {class:'tbl-scroll short', style:'margin-top:8px;'});
+      var table = el('table', {class:'data'});
+      table.appendChild(el('thead',{},[el('tr',{},[el('th',{},['Из файла']), el('th',{},['Место'])])]));
+      var tbody = el('tbody');
+      notFound.slice(0,300).forEach(function(r){ tbody.appendChild(el('tr',{},[el('td',{class:'mono'},[r.ident]), el('td',{class:'mono'},[r.loc])])); });
+      table.appendChild(tbody); wrap.appendChild(table);
+      box.appendChild(wrap);
+    }
+    container.appendChild(box);
   }
 
   /* ================= STOCK (остатки) TAB ================= */
@@ -845,6 +1076,8 @@
 
   /* ================= ORDERS TAB ================= */
   var ordersFilterMp = '';
+  var openBatches = new Set();  // ids of expanded order uploads (survive redraws)
+  var sortByLoc = new Set();    // ids of uploads shown sorted by storage location
   function renderOrders(){
     els.main.innerHTML = '';
     var wrap = el('div', {class:'col'});
@@ -900,24 +1133,83 @@
       el('span', {class:'muted small'}, [(b.rows?b.rows.length:0) + ' стр · ' + dateStr])
     ]));
     var body = el('div', {class:'batch-body'});
-    var cols = b.columns || (b.rows && b.rows[0] ? Object.keys(b.rows[0]) : []);
-    var tblWrap = el('div', {class:'tbl-scroll short'});
-    var table = el('table', {class:'data'});
-    table.appendChild(el('thead', {}, [el('tr', {}, cols.map(function(c){ return el('th',{},[c]); }))]));
-    var tbody = el('tbody');
-    (b.rows||[]).slice(0,100).forEach(function(r){
-      tbody.appendChild(el('tr', {}, cols.map(function(c){ return el('td', {}, [r[c]==null?'':String(r[c])]); })));
-    });
-    table.appendChild(tbody); tblWrap.appendChild(table);
-    body.appendChild(tblWrap);
-    if ((b.rows||[]).length>100) body.appendChild(el('div', {class:'muted small', style:'padding:6px 2px;'}, ['Показаны первые 100 из ' + b.rows.length]));
-    body.appendChild(el('button', {class:'btn bad small', style:'margin-top:8px;', onclick:function(){ deleteBatch(b.id); }}, ['Удалить загрузку']));
     d.appendChild(body);
+    var built = false;
+    function build(){ if (built) return; built = true; fillBatchBody(body, b); }
+    if (openBatches.has(b.id)){ d.open = true; build(); }
+    d.addEventListener('toggle', function(){
+      if (d.open){ openBatches.add(b.id); build(); } else { openBatches.delete(b.id); }
+    });
     return d;
   }
 
+  // the column whose values match our nomenclature best (barcode / SKU / article)
+  function detectIdColumn(b, cols){
+    var sample = (b.rows || []).slice(0, 150);
+    var best = null, bestN = 0;
+    cols.forEach(function(c){
+      var n = 0;
+      sample.forEach(function(r){ if (lookupItemByCell(r[c])) n++; });
+      if (n > bestN){ bestN = n; best = c; }
+    });
+    return best;
+  }
+
+  function fillBatchBody(body, b){
+    body.innerHTML = '';
+    var cols = b.columns || (b.rows && b.rows[0] ? Object.keys(b.rows[0]) : []);
+    var idCol = detectIdColumn(b, cols);
+    var view = (b.rows || []).map(function(r){ return { row: r, it: idCol ? lookupItemByCell(r[idCol]) : null }; });
+
+    if (idCol){
+      var found = view.filter(function(x){ return x.it; }).length;
+      body.appendChild(el('div', {class:'muted small', style:'margin-bottom:8px;'}, ['Товар определён по столбцу «' + idCol + '». Найдено в номенклатуре: ' + found + ' из ' + view.length + '.']));
+      var sorted = sortByLoc.has(b.id);
+      body.appendChild(el('button', {class:'btn small', style:'margin-bottom:8px;', onclick:function(){
+        if (sorted) sortByLoc.delete(b.id); else sortByLoc.add(b.id);
+        fillBatchBody(body, b);
+      }}, [sorted ? '↕ Порядок из файла' : '↕ Сортировать по месту']));
+      if (sorted){
+        view.sort(function(x, y){
+          var a = x.it && x.it.location ? normLoc(x.it.location) : '';
+          var c = y.it && y.it.location ? normLoc(y.it.location) : '';
+          if (!a && !c) return 0;
+          if (!a) return 1;
+          if (!c) return -1;
+          return a.localeCompare(c, 'ru', { numeric: true });
+        });
+      }
+    } else {
+      body.appendChild(el('div', {class:'muted small', style:'margin-bottom:8px;'}, ['Не удалось сопоставить строки с номенклатурой (нет столбца с артикулом, SKU или штрихкодом) — места не показаны.']));
+    }
+
+    var headCols = cols.slice();
+    if (idCol) headCols = headCols.concat(['Место', 'Остаток']);
+    var tblWrap = el('div', {class:'tbl-scroll short'});
+    var table = el('table', {class:'data'});
+    table.appendChild(el('thead', {}, [el('tr', {}, headCols.map(function(c){ return el('th',{},[c]); }))]));
+    var tbody = el('tbody');
+    view.slice(0, 100).forEach(function(x){
+      var tds = cols.map(function(c){ return el('td', {}, [x.row[c]==null?'':String(x.row[c])]); });
+      if (idCol){
+        if (x.it){
+          tds.push(el('td', {class:'mono', style:'font-weight:700;white-space:nowrap;'}, [x.it.location || '—']));
+          tds.push(el('td', {class:'num-cell' + (x.it.stock<=0?' zero-cell':'')}, [fmtInt(x.it.stock)]));
+        } else {
+          tds.push(el('td', {class:'muted small'}, ['нет в номенклатуре']));
+          tds.push(el('td', {}, ['']));
+        }
+      }
+      tbody.appendChild(el('tr', {}, tds));
+    });
+    table.appendChild(tbody); tblWrap.appendChild(table);
+    body.appendChild(tblWrap);
+    if (view.length > 100) body.appendChild(el('div', {class:'muted small', style:'padding:6px 2px;'}, ['Показаны первые 100 из ' + view.length]));
+    body.appendChild(el('button', {class:'btn bad small', style:'margin-top:8px;', onclick:function(){ deleteBatch(b.id); }}, ['Удалить загрузку']));
+  }
+
   async function deleteBatch(id){
-    try{ await apiFetch('/api/orders/' + encodeURIComponent(id), { method:'DELETE' }); toast('Загрузка удалена', 'ok'); refreshOrders(); }
+    try{ await apiFetch('/api/orders/' + encodeURIComponent(id), { method:'DELETE' }); toast('Загрузка удалена', 'ok'); refreshOrders(true); }
     catch(e){ toast('Не удалось удалить', 'bad'); }
   }
 
@@ -942,7 +1234,7 @@
       var res = await apiFetch('/api/orders', { method:'POST', body: JSON.stringify({ marketplace: marketplace, fileName: fileName, columns: keptCols, rows: rows }) });
       toast('Заказы сохранены: ' + res.rowCount + ' строк', 'ok');
       document.getElementById('ordersUploadWizard').innerHTML = '';
-      refreshOrders();
+      refreshOrders(true);
     }catch(e){ toast('Ошибка сохранения заказов', 'bad'); }
   }
 

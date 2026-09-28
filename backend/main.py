@@ -58,10 +58,15 @@ def init_db():
                 barcode_ozn TEXT DEFAULT '',
                 barcode2 TEXT DEFAULT '',
                 stock INTEGER DEFAULT 0,
-                updated_at TEXT DEFAULT ''
+                updated_at TEXT DEFAULT '',
+                location TEXT DEFAULT ''
             )
             """
         )
+        # migration for databases created before storage locations existed
+        item_cols = [r["name"] for r in conn.execute("PRAGMA table_info(items)").fetchall()]
+        if "location" not in item_cols:
+            conn.execute("ALTER TABLE items ADD COLUMN location TEXT DEFAULT ''")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS order_batches (
@@ -113,6 +118,7 @@ class ItemIn(BaseModel):
     barcodeOzn: str = ""
     barcode2: str = ""
     stock: int = 0
+    location: str = ""
 
 
 class ItemPatch(BaseModel):
@@ -120,6 +126,16 @@ class ItemPatch(BaseModel):
     name: Optional[str] = None
     barcodeOzn: Optional[str] = None
     barcode2: Optional[str] = None
+    location: Optional[str] = None
+
+
+class LocationRow(BaseModel):
+    sku: str
+    location: str = ""
+
+
+class LocationsIn(BaseModel):
+    rows: List[LocationRow]
 
 
 class StockDelta(BaseModel):
@@ -146,6 +162,7 @@ def row_to_item(row) -> dict:
         "barcodeOzn": row["barcode_ozn"] or "",
         "barcode2": row["barcode2"] or "",
         "stock": row["stock"] or 0,
+        "location": row["location"] or "",
         "updatedAt": row["updated_at"] or "",
     }
 
@@ -165,16 +182,17 @@ def upsert_item(sku: str, item: ItemIn, _: bool = Depends(check_key)):
         stock = existing["stock"] if existing is not None else item.stock
         conn.execute(
             """
-            INSERT INTO items (sku, article, name, barcode_ozn, barcode2, stock, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO items (sku, article, name, barcode_ozn, barcode2, stock, location, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(sku) DO UPDATE SET
                 article=excluded.article,
                 name=excluded.name,
                 barcode_ozn=CASE WHEN excluded.barcode_ozn != '' THEN excluded.barcode_ozn ELSE items.barcode_ozn END,
                 barcode2=CASE WHEN excluded.barcode2 != '' THEN excluded.barcode2 ELSE items.barcode2 END,
+                location=CASE WHEN excluded.location != '' THEN excluded.location ELSE items.location END,
                 updated_at=excluded.updated_at
             """,
-            (sku, item.article, item.name, item.barcodeOzn, item.barcode2, stock, now),
+            (sku, item.article, item.name, item.barcodeOzn, item.barcode2, stock, item.location.strip(), now),
         )
         row = conn.execute("SELECT * FROM items WHERE sku = ?", (sku,)).fetchone()
     return row_to_item(row)
@@ -189,7 +207,9 @@ def patch_item(sku: str, patch: ItemPatch, _: bool = Depends(check_key)):
         fields = patch.dict(exclude_unset=True)
         if not fields:
             return row_to_item(row)
-        col_map = {"article": "article", "name": "name", "barcodeOzn": "barcode_ozn", "barcode2": "barcode2"}
+        col_map = {"article": "article", "name": "name", "barcodeOzn": "barcode_ozn", "barcode2": "barcode2", "location": "location"}
+        if fields.get("location") is not None:
+            fields["location"] = fields["location"].strip()
         sets = ", ".join(f"{col_map[k]} = ?" for k in fields if k in col_map)
         values = [v for k, v in fields.items() if k in col_map]
         values.append(_now_iso())
@@ -223,6 +243,20 @@ def delete_item(sku: str, _: bool = Depends(check_key)):
     with get_conn() as conn:
         conn.execute("DELETE FROM items WHERE sku = ?", (sku,))
     return {"deleted": sku}
+
+
+@app.post("/api/items/locations")
+def bulk_set_locations(body: LocationsIn, _: bool = Depends(check_key)):
+    now = _now_iso()
+    updated = 0
+    with get_conn() as conn:
+        for r in body.rows:
+            cur = conn.execute(
+                "UPDATE items SET location = ?, updated_at = ? WHERE sku = ?",
+                (r.location.strip(), now, r.sku),
+            )
+            updated += cur.rowcount
+    return {"updated": updated, "received": len(body.rows)}
 
 
 @app.post("/api/items/reset-stock")

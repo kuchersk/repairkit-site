@@ -5,7 +5,11 @@ services:
     expose:
       - "8000"
     environment:
+      # Ключ склада Иваново (как раньше).
       - APP_API_KEY=${APP_API_KEY:-}
+      # Дополнительные склады-города, формат  id:Название:ключ;id2:Название2:ключ2
+      # Пример: spb:Санкт-Петербург:длинный-случайный-ключ
+      - WAREHOUSES=${WAREHOUSES:-}
     volumes:
       - repairkit_data:/app/data
 

@@ -56,6 +56,23 @@
   .loc-list-row{ display:flex; justify-content:space-between; gap:10px; padding:9px 4px; border-bottom:1px solid var(--border); cursor:pointer; }
   .loc-list-row:last-child{ border-bottom:none; }
   .loc-list-row:hover{ background:var(--surface-2); }
+  .big-input{ font-size:20px; padding:16px 14px; letter-spacing:.02em; }
+  .ship-line{ display:flex; justify-content:space-between; align-items:center; gap:10px; padding:11px 10px; border:1px solid var(--border); border-radius:var(--radius-sm); margin-bottom:8px; background:var(--surface-2); }
+  .ship-line.done{ border-color:var(--ok); background:var(--ok-bg); }
+  .ship-line.over{ border-color:var(--bad); background:var(--bad-bg); }
+  .ship-main{ flex:1; min-width:0; }
+  .ship-name{ font-weight:700; font-size:14px; line-height:1.3; }
+  .ship-meta{ display:flex; flex-wrap:wrap; gap:4px 12px; align-items:center; margin-top:4px; }
+  .ship-qty{ display:flex; align-items:center; gap:8px; }
+  .ship-count{ font-weight:800; font-size:17px; min-width:52px; text-align:center; }
+  .big-money{ font-size:24px; font-weight:800; }
+  .neg{ color:var(--bad); }
+  tr.struck td{ text-decoration:line-through; opacity:.55; }
+  .loc-badge.small{ font-size:13px; padding:2px 8px; }
+  .sum-table td{ padding:9px 8px; }
+  .pack-row{ display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:8px; }
+  .pack-row .stepper{ display:flex; align-items:center; gap:6px; }
+  .pack-row input{ width:56px; text-align:center; }
   .founder-photo{ display:none; }
   /* The site stays centred; the photo sits in the free space on the left and never pushes the content.
      Its width follows the free space (760px = content column), and it disappears when there is not enough room. */
@@ -99,10 +116,12 @@
   nav.tabs .bar{
     display:flex; gap:2px; background:var(--surface); border:1px solid var(--border);
     border-radius:16px; padding:4px; box-shadow:var(--shadow); max-width:760px; width:100%;
+    overflow-x:auto; scrollbar-width:none;
   }
+  nav.tabs .bar::-webkit-scrollbar{ display:none; }
   nav.tabs button{
-    flex:1; border:none; background:transparent; color:var(--muted); font:inherit;
-    font-weight:600; font-size:12.5px; padding:9px 4px; border-radius:12px; cursor:pointer;
+    flex:1 0 auto; min-width:58px; border:none; background:transparent; color:var(--muted); font:inherit;
+    font-weight:600; font-size:11.5px; padding:9px 7px; border-radius:12px; cursor:pointer; white-space:nowrap;
     display:flex; flex-direction:column; align-items:center; gap:2px;
   }
   nav.tabs button .ic{ font-size:17px; line-height:1; }
@@ -224,7 +243,7 @@
 <div class="shell">
   <header class="top">
     <div>
-      <h1>Repairkit <span>· Склад · Иваново</span></h1>
+      <h1>Repairkit <span id="cityTitle">· Склад · Иваново</span></h1>
       <div class="sub" id="connStatus">Подключение…</div>
     </div>
     <div class="sub" id="itemsCountBadge"></div>
@@ -236,9 +255,11 @@
   <nav class="tabs">
     <div class="bar" id="tabBar">
       <button data-tab="scan" class="active"><span class="ic">🔦</span>Скан</button>
+      <button data-tab="ship"><span class="ic">📦</span>Отгрузка</button>
       <button data-tab="nomen"><span class="ic">📋</span>Номенклатура</button>
       <button data-tab="stock"><span class="ic">📥</span>Остатки</button>
       <button data-tab="orders"><span class="ic">🧾</span>Заказы</button>
+      <button data-tab="ledger"><span class="ic">💰</span>Начисления</button>
     </div>
   </nav>
 </div>
@@ -255,6 +276,10 @@
   var articleIndex = new Map(); // lower-cased article -> sku
   var orderBatches = new Map(); // id -> {marketplace,fileName,uploadedAt,columns,rows,partOf,partIndex,partsTotal}
   var recentScans = [];         // client-side only, most recent first
+  var tariff = [];              // price list rows from the server
+  var tariffMap = {};
+  var who = null;               // {city, name} of the warehouse this key belongs to
+  var shippedKeys = new Set();  // "mp|order" of orders that are already shipped
   var uploadBusy = false;       // true while a bulk upload loop is running (guards against accidental navigation)
   window.addEventListener('beforeunload', function(e){
     if (uploadBusy){ e.preventDefault(); e.returnValue = ''; }
@@ -286,6 +311,27 @@
     return String(raw).split(/[,;]/).map(function(s){ return s.trim(); }).filter(Boolean);
   }
   function nowIso(){ return new Date().toISOString(); }
+  var MP_LABEL = { wb:'WB', ozon:'Ozon', ym:'Яндекс-Маркет' };
+  function mpKey(text){
+    var t = String(text||'').toLowerCase();
+    if (/wild|вайлд|(^|[^a-z])wb([^a-z]|$)/.test(t)) return 'wb';
+    if (/ozon|озон/.test(t)) return 'ozon';
+    if (/яндекс|yandex|(^|[^a-z])ym([^a-z]|$)|маркет/.test(t)) return 'ym';
+    return '';
+  }
+  function fmtMoney(n){
+    n = Number(n)||0;
+    var frac = Math.abs(n - Math.round(n)) > 0.004;
+    return n.toLocaleString('ru-RU', { minimumFractionDigits: frac?2:0, maximumFractionDigits: 2 }) + ' ₽';
+  }
+  function fmtQty(n){ return (Number(n)||0).toLocaleString('ru-RU', { maximumFractionDigits: 2 }); }
+  function tprice(key){ var t = tariffMap[key]; return t ? (Number(t.price)||0) : 0; }
+  function pad2(n){ return (n < 10 ? '0' : '') + n; }
+  function downloadBlob(blob, filename){
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a'); a.href = url; a.download = filename; document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(function(){ URL.revokeObjectURL(url); }, 4000);
+  }
   var CYR2LAT = {'А':'A','В':'B','Е':'E','К':'K','М':'M','Н':'H','О':'O','Р':'P','С':'C','Т':'T','Х':'X','У':'Y'};
   // normalises a storage location for comparison only (Cyrillic look-alikes -> Latin, dash variants, no spaces)
   function normLoc(s){
@@ -320,7 +366,7 @@
   function userIsBusy(){
     var a = document.activeElement;
     if (a && a !== document.body && (a.tagName === 'INPUT' || a.tagName === 'SELECT' || a.tagName === 'TEXTAREA')){
-      if (a.id !== 'scanInput' || a.value) return true;
+      if (['scanInput', 'shipScanInput', 'shipOrderInput'].indexOf(a.id) < 0 || a.value) return true;
     }
     if (document.querySelector('.step-wizard')) return true;
     return false;
@@ -372,13 +418,36 @@
 
   async function initApp(){
     els.status.textContent = 'Загрузка…';
-    await refreshItems(true);
+    await Promise.all([refreshItems(true), loadWho(), loadTariff()]);
     refreshOrders(true);
+    loadShipped();
     if (!intervalsStarted){
       intervalsStarted = true;
       setInterval(function(){ if (!uploadBusy) refreshItems(false); }, 15000);
       setInterval(function(){ if (!uploadBusy && currentTab === 'orders') refreshOrders(false); }, 20000);
     }
+  }
+
+  async function loadWho(){
+    try{
+      who = await apiFetch('/api/whoami');
+      var t = '· Склад · ' + who.name;
+      document.getElementById('cityTitle').textContent = t;
+      document.title = 'Repairkit ' + t;
+    }catch(e){}
+  }
+  async function loadTariff(){
+    try{
+      tariff = await apiFetch('/api/tariff');
+      tariffMap = {};
+      tariff.forEach(function(t){ tariffMap[t.key] = t; });
+    }catch(e){}
+  }
+  async function loadShipped(){
+    try{ shippedKeys = new Set((await apiFetch('/api/shipped')).keys); }catch(e){}
+  }
+  async function loadShipOps(){
+    try{ shipState.ops = await apiFetch('/api/ops?kind=ship&limit=15'); }catch(e){}
   }
 
   function indexItem(it){
@@ -400,7 +469,7 @@
       barcodeIndex = new Map();
       articleIndex = new Map();
       list.forEach(indexItem);
-      if (force || !userIsBusy()) render();
+      if (force || (!userIsBusy() && currentTab !== 'ledger')) render();
     }catch(e){
       if (e && e.status === 401) els.status.textContent = 'Не задан или неверен ключ доступа — нажмите ⚙';
       else if (e && e.status) els.status.textContent = 'Ошибка сервера (код ' + e.status + ')';
@@ -426,7 +495,10 @@
     else if (currentTab === 'nomen') renderNomen();
     else if (currentTab === 'stock') renderStock();
     else if (currentTab === 'orders') renderOrders();
+    else if (currentTab === 'ship') renderShip();
+    else if (currentTab === 'ledger') renderLedger();
   }
+  function rerenderIfIdle(){ if (!userIsBusy()) render(); }
 
   document.getElementById('tabBar').addEventListener('click', function(e){
     var b = e.target.closest('button[data-tab]'); if (!b) return;
@@ -434,6 +506,8 @@
     Array.prototype.forEach.call(document.querySelectorAll('#tabBar button'), function(x){ x.classList.toggle('active', x===b); });
     render();
     if (currentTab === 'orders') refreshOrders(false);
+    if (currentTab === 'ship') Promise.all([loadShipped(), loadShipOps(), refreshItems(false)]).then(rerenderIfIdle);
+    if (currentTab === 'ledger') loadTariff().then(rerenderIfIdle);
   });
 
   /* ================= SCAN TAB ================= */
@@ -474,9 +548,13 @@
       histCard.appendChild(el('h2', {}, ['Последние сканы']));
       var list = el('div', {class:'col'});
       recentScans.slice(0,8).forEach(function(h){
-        list.appendChild(el('div', {class:'row', style:'font-size:13px;justify-content:space-between;'}, [
+        list.appendChild(el('div', {class:'row', style:'font-size:13px;justify-content:space-between;' + (h.undone ? 'opacity:.5;text-decoration:line-through;' : '')}, [
           el('span', {}, [h.name || h.barcode]),
-          el('span', {class: (h.delta>0?'ok':'bad'), style:'font-family:JetBrains Mono,monospace;font-weight:700;color:var(--' + (h.delta>0?'ok':'bad') + ');'}, [(h.delta>0?'+':'') + h.delta])
+          el('span', {class:'row', style:'gap:8px;'}, [
+            h.total ? el('span', {class:'muted small'}, [fmtMoney(h.total)]) : null,
+            el('span', {style:'font-family:JetBrains Mono,monospace;font-weight:700;color:var(--' + (h.delta>0?'ok':'bad') + ');'}, [(h.delta>0?'+':'') + h.delta]),
+            (h.opId && !h.undone) ? el('button', {class:'btn small', onclick:function(){ undoOp(h.opId); }}, ['Отменить']) : null
+          ])
         ]));
       });
       histCard.appendChild(list);
@@ -534,10 +612,24 @@
     qtyRow.appendChild(el('label',{},['Кол-во:']));
     qtyRow.appendChild(qtyInput);
     box.appendChild(qtyRow);
+    var labelRow = el('div', {class:'qty-row'});
+    var labelSel = el('select', {id:'recvLabel', style:'flex:1;'});
+    [['', 'Без печати этикеток'],
+     ['label_58x40', 'Печать этикеток 58×40 · ' + fmtMoney(tprice('label_58x40')) + '/шт'],
+     ['label_75x120', 'Печать этикеток 75×120 · ' + fmtMoney(tprice('label_75x120')) + '/шт']].forEach(function(o){
+      labelSel.appendChild(el('option', {value:o[0]}, [o[1]]));
+    });
+    labelSel.value = localStorage.getItem('rk_label') || '';
+    if (labelSel.value !== (localStorage.getItem('rk_label') || '')) labelSel.value = '';
+    labelSel.addEventListener('change', function(){ localStorage.setItem('rk_label', this.value); });
+    labelRow.appendChild(el('label', {}, ['При приёмке:']));
+    labelRow.appendChild(labelSel);
+    box.appendChild(labelRow);
     var actions = el('div', {class:'action-row'});
-    actions.appendChild(el('button', {class:'btn bad', onclick:function(){ applyDelta(item.sku, -scanState.qty); }}, ['➖ Списать']));
-    actions.appendChild(el('button', {class:'btn ok', onclick:function(){ applyDelta(item.sku, scanState.qty); }}, ['➕ Принять']));
+    actions.appendChild(el('button', {class:'btn bad', onclick:function(){ doWriteoff(item.sku, scanState.qty); }}, ['➖ Списать']));
+    actions.appendChild(el('button', {class:'btn ok', onclick:function(){ doReceive(item.sku, scanState.qty, labelSel.value); }}, ['➕ Принять']));
     box.appendChild(actions);
+    box.appendChild(el('div', {class:'muted small', style:'margin-top:8px;'}, ['Приёмка попадает в журнал начислений (' + fmtMoney(tprice('receive')) + ' за шт). Списание — без начислений.']));
     return box;
   }
 
@@ -617,17 +709,44 @@
     patchLocation(it.sku, v.trim());
   }
 
-  async function applyDelta(sku, delta){
+  async function doReceive(sku, qty, label){
     try{
-      var it = await apiFetch('/api/items/' + encodeURIComponent(sku) + '/stock', { method:'POST', body: JSON.stringify({ delta: delta }) });
-      indexItem(it);
-      recentScans.unshift({ name: it.name, barcode: it.barcodeOzn || it.barcode2 || '', delta: delta });
+      var r = await apiFetch('/api/receive', { method:'POST', body: JSON.stringify({ sku: sku, qty: qty, label: label || null }) });
+      indexItem(r.item);
+      recentScans.unshift({ name: r.item.name, barcode: r.item.barcodeOzn || r.item.barcode2 || '', delta: qty, opId: r.opId, total: r.total });
       recentScans = recentScans.slice(0, 20);
-      toast((delta>0?'Принято +':'Списано ') + Math.abs(delta) + ' · ' + (it.name||sku), 'ok');
+      toast('Принято +' + qty + ' · ' + (r.item.name || sku) + ' · начислено ' + fmtMoney(r.total), 'ok');
       scanState.found = null; scanState.notFoundCode = null;
       render();
     }catch(e){
-      toast('Не удалось обновить остаток', 'bad');
+      toast('Не удалось принять товар', 'bad');
+    }
+  }
+
+  async function doWriteoff(sku, qty){
+    try{
+      var r = await apiFetch('/api/writeoff', { method:'POST', body: JSON.stringify({ sku: sku, qty: qty }) });
+      indexItem(r.item);
+      recentScans.unshift({ name: r.item.name, barcode: r.item.barcodeOzn || r.item.barcode2 || '', delta: -r.taken, opId: r.opId });
+      recentScans = recentScans.slice(0, 20);
+      toast(r.taken < qty ? ('Списано только ' + r.taken + ' (остаток был меньше) · ' + (r.item.name || sku)) : ('Списано ' + qty + ' · ' + (r.item.name || sku)), r.taken < qty ? 'warn' : 'ok');
+      scanState.found = null; scanState.notFoundCode = null;
+      render();
+    }catch(e){
+      toast('Не удалось списать товар', 'bad');
+    }
+  }
+
+  async function undoOp(opId, after){
+    if (!confirm('Отменить операцию? Остаток и начисления вернутся назад.')) return;
+    try{
+      await apiFetch('/api/ops/' + opId + '/undo', { method:'POST' });
+      recentScans.forEach(function(h){ if (h.opId === opId) h.undone = true; });
+      toast('Операция отменена', 'ok');
+      await Promise.all([refreshItems(true), loadShipped()]);
+      if (after) await after();
+    }catch(e){
+      toast(e && /not_enough_stock/.test(e.message || '') ? 'Нельзя отменить приёмку: часть товара уже списана или отгружена' : 'Не удалось отменить операцию', 'bad');
     }
   }
 
@@ -641,10 +760,12 @@
     var sku = safeId('NEW-' + code);
     var isOzn = code.toUpperCase().indexOf('OZN')===0;
     try{
-      var it = await apiFetch('/api/items/' + encodeURIComponent(sku), { method:'PUT', body: JSON.stringify({ article: art, name: name, barcodeOzn: isOzn?code:'', barcode2: isOzn?'':code, stock: qty, location: newLoc }) });
+      var it = await apiFetch('/api/items/' + encodeURIComponent(sku), { method:'PUT', body: JSON.stringify({ article: art, name: name, barcodeOzn: isOzn?code:'', barcode2: isOzn?'':code, stock: 0, location: newLoc }) });
       indexItem(it);
-      recentScans.unshift({ name: name, barcode: code, delta: qty });
-      toast('Позиция создана', 'ok');
+      var rcv = null;
+      if (qty > 0){ rcv = await apiFetch('/api/receive', { method:'POST', body: JSON.stringify({ sku: sku, qty: qty }) }); indexItem(rcv.item); }
+      recentScans.unshift({ name: name, barcode: code, delta: qty, opId: rcv ? rcv.opId : null, total: rcv ? rcv.total : 0 });
+      toast('Позиция создана' + (rcv ? ' · начислено ' + fmtMoney(rcv.total) : ''), 'ok');
       scanState.found = null; scanState.notFoundCode = null;
       render();
     }catch(e){ toast('Не удалось создать позицию', 'bad'); }
@@ -754,6 +875,7 @@
     var addQty = el('input', {type:'number', min:'0', value:'0', placeholder:'Начальный остаток', style:'margin-bottom:10px;'});
     addCard.appendChild(addName); addCard.appendChild(addArt); addCard.appendChild(addSku);
     addCard.appendChild(addOzn); addCard.appendChild(addBc2); addCard.appendChild(addLoc); addCard.appendChild(addQty);
+    addCard.appendChild(el('div', {class:'muted small', style:'margin:-4px 0 10px;'}, ['Начальный остаток оформляется как приёмка и попадает в журнал начислений.']));
     addCard.appendChild(el('button', {class:'btn primary', style:'width:100%;', onclick:function(){
       addManualItem(addName.value.trim(), addArt.value.trim(), addSku.value.trim(), addOzn.value.trim(), addBc2.value.trim(), addQty.value, addLoc.value.trim());
     }}, ['Добавить позицию']));
@@ -861,9 +983,11 @@
     var finalSku = sku ? safeId(sku) : safeId((article ? 'ART-'+article : 'ITEM-'+Date.now()));
     if (items.has(finalSku)){ toast('SKU уже существует: ' + finalSku, 'bad'); return; }
     try{
-      var it = await apiFetch('/api/items/' + encodeURIComponent(finalSku), { method:'PUT', body: JSON.stringify({ article: article, name: name, barcodeOzn: ozn, barcode2: bc2, stock: qty, location: location || '' }) });
+      var it = await apiFetch('/api/items/' + encodeURIComponent(finalSku), { method:'PUT', body: JSON.stringify({ article: article, name: name, barcodeOzn: ozn, barcode2: bc2, stock: 0, location: location || '' }) });
       indexItem(it);
-      toast('Позиция добавлена', 'ok');
+      var rcv = null;
+      if (qty > 0){ rcv = await apiFetch('/api/receive', { method:'POST', body: JSON.stringify({ sku: finalSku, qty: qty }) }); indexItem(rcv.item); }
+      toast('Позиция добавлена' + (rcv ? ' · начислено ' + fmtMoney(rcv.total) : ''), 'ok');
       renderNomen();
     }catch(e){ toast('Не удалось добавить', 'bad'); }
   }
@@ -1219,21 +1343,36 @@
     readWorkbook(file, function(wb, sheetNames){
       renderUploadWizard(document.getElementById('ordersUploadWizard'), wb, sheetNames, {
         columnKeepMode: true,
-        onApply: function(keptCols, dataRows){
-          applyOrdersUpload(marketplace, fileName, keptCols, dataRows);
+        metaFields: [
+          { key:'orderCol', label:'Номер заказа / отправления', guess:['номер отправления','номер заказа','номер задания','posting','отправлен','заказ','задани'] },
+          { key:'idCol', label:'Товар (артикул, SKU или штрихкод)', guess:['артикул','sku','штрихкод','баркод','offer'], detect: detectIdColumnFromRows },
+          { key:'qtyCol', label:'Количество', guess:['количество','кол-во','колич','qty','шт'] }
+        ],
+        onApply: function(keptCols, dataRows, meta){
+          applyOrdersUpload(marketplace, fileName, keptCols, dataRows, meta);
         }
       });
     });
   }
 
-  async function applyOrdersUpload(marketplace, fileName, keptCols, dataRows){
+  function detectIdColumnFromRows(headers, rows){
+    var sample = rows.slice(0, 150), best = null, bestN = 0;
+    headers.forEach(function(h){
+      var n = 0;
+      sample.forEach(function(r){ if (lookupItemByCell(r[h])) n++; });
+      if (n > bestN){ bestN = n; best = h; }
+    });
+    return best;
+  }
+
+  async function applyOrdersUpload(marketplace, fileName, keptCols, dataRows, meta){
     var rows = dataRows.map(function(row){
       var o = {};
       keptCols.forEach(function(c){ o[c] = row[c]==null?'':row[c]; });
       return o;
     }).filter(function(o){ return Object.values(o).some(function(v){ return v!==''; }); });
     try{
-      var res = await apiFetch('/api/orders', { method:'POST', body: JSON.stringify({ marketplace: marketplace, fileName: fileName, columns: keptCols, rows: rows }) });
+      var res = await apiFetch('/api/orders', { method:'POST', body: JSON.stringify({ marketplace: marketplace, fileName: fileName, columns: keptCols, rows: rows, meta: meta || {} }) });
       toast('Заказы сохранены: ' + res.rowCount + ' строк', 'ok');
       document.getElementById('ordersUploadWizard').innerHTML = '';
       refreshOrders(true);
@@ -1320,13 +1459,37 @@
           chipsWrap.appendChild(el('label', {class:'chip-check'}, [cb, h]));
         });
         s3.appendChild(chipsWrap);
+        var metaSel = {};
+        if (opts.metaFields){
+          var metaBox = el('div', {class:'col', style:'margin-top:14px;'});
+          metaBox.appendChild(el('div', {class:'muted small'}, ['Чтобы собирать и отгружать эти заказы на вкладке «Отгрузка», укажите столбцы:']));
+          opts.metaFields.forEach(function(f){
+            var fr = el('div', {});
+            fr.appendChild(el('label', {}, [f.label]));
+            var msel = el('select', {style:'margin-top:4px;'});
+            msel.appendChild(el('option', {value:''}, ['— не использовать —']));
+            headerRowVals.forEach(function(h){ msel.appendChild(el('option', {value:h}, [h])); });
+            var g = f.detect ? f.detect(headerRowVals, dataRowObjs) : null;
+            if (!g) g = headerRowVals.find(function(h){ return f.guess.some(function(k){ return h.toLowerCase().indexOf(k) >= 0; }); });
+            if (g) msel.value = g;
+            metaSel[f.key] = msel;
+            fr.appendChild(msel);
+            metaBox.appendChild(fr);
+          });
+          s3.appendChild(metaBox);
+        }
         wiz.appendChild(s3);
 
         var s4 = el('div', {class:'step'});
         s4.appendChild(el('div', {}, [el('span',{class:'step-num'},[String(Number(stepN)+1)]), fmtInt(dataRowObjs.length) + ' строк готовы к сохранению']));
         s4.appendChild(el('button', {class:'btn primary big', style:'width:100%;margin-top:10px;', onclick:function(){
           var kept = headerRowVals.filter(function(h){ return checks[h].checked; });
-          opts.onApply(kept, dataRowObjs);
+          var meta = {};
+          Object.keys(metaSel).forEach(function(k){
+            var v = metaSel[k].value;
+            if (v){ meta[k] = v; if (kept.indexOf(v) < 0) kept.push(v); }
+          });
+          opts.onApply(kept, dataRowObjs, meta);
         }}, ['Сохранить заказы']));
         wiz.appendChild(s4);
       } else {
@@ -1374,6 +1537,598 @@
     var p = document.getElementById('wizProgress');
     if (!p) return;
     p.textContent = finished ? ('Готово: ' + fmtInt(done) + ' из ' + fmtInt(total)) : ('Обработано ' + fmtInt(done) + ' из ' + fmtInt(total) + '…');
+  }
+
+  /* ================= SHIPMENT TAB (отгрузка по заказу) ================= */
+  var shipState = { order:null, mp:'', filter:'', pack:{ pack_bag:0, pack_box:0 }, ops:[], busy:false };
+  var ORDER_GUESS = ['номер отправления','номер заказа','номер задания','posting','отправлен','заказ','задани'];
+  var QTY_GUESS = ['количество','кол-во','колич','qty','шт'];
+  var orderIndexSig = '', orderIndex = new Map();
+
+  function guessCol(cols, keys){
+    for (var k = 0; k < keys.length; k++){
+      var f = cols.find(function(c){ return String(c).toLowerCase().indexOf(keys[k]) >= 0; });
+      if (f) return f;
+    }
+    return null;
+  }
+  function getBatchMeta(b){
+    var m = b.meta || {};
+    var cols = b.columns || (b.rows && b.rows[0] ? Object.keys(b.rows[0]) : []);
+    return {
+      orderCol: m.orderCol || guessCol(cols, ORDER_GUESS),
+      qtyCol: m.qtyCol || guessCol(cols, QTY_GUESS),
+      idCol: m.idCol || detectIdColumn(b, cols)
+    };
+  }
+
+  // orders found in the uploaded files, grouped by marketplace + order number
+  function buildOrderIndex(){
+    var sig = Array.from(orderBatches.keys()).sort().join(',') + '|' + items.size;
+    if (sig === orderIndexSig) return orderIndex;
+    orderIndexSig = sig;
+    orderIndex = new Map();
+    orderBatches.forEach(function(b){
+      var meta = getBatchMeta(b);
+      if (!meta.orderCol) return;
+      var mp = mpKey(b.marketplace);
+      (b.rows || []).forEach(function(r){
+        var no = String(r[meta.orderCol] == null ? '' : r[meta.orderCol]).trim();
+        if (!no) return;
+        var key = mp + '|' + no;
+        var o = orderIndex.get(key);
+        if (!o){ o = { key: key, mp: mp, no: no, lines: new Map(), unknown: [] }; orderIndex.set(key, o); }
+        var cell = meta.idCol ? r[meta.idCol] : null;
+        var q = meta.qtyCol ? parseFloat(String(r[meta.qtyCol]).replace(',', '.')) : 1;
+        q = isFinite(q) && q > 0 ? Math.round(q) || 1 : 1;
+        var it = lookupItemByCell(cell);
+        if (it){
+          var L = o.lines.get(it.sku);
+          if (!L){ L = { sku: it.sku, need: 0 }; o.lines.set(it.sku, L); }
+          L.need += q;
+        } else {
+          o.unknown.push({ ident: cell == null ? '' : String(cell), need: q });
+        }
+      });
+    });
+    return orderIndex;
+  }
+
+  function defaultPack(){
+    var mp = shipState.mp;
+    shipState.pack = { pack_bag: (mp === 'ozon' || mp === 'ym') ? 1 : 0, pack_box: mp === 'wb' ? 1 : 0 };
+  }
+  function openOrder(o){
+    if (shippedKeys.has(o.key)){ toast('Заказ уже отгружен', 'bad'); return; }
+    shipState.order = {
+      key: o.key, no: o.no, manual: false, unknown: o.unknown.slice(),
+      lines: Array.from(o.lines.values()).map(function(L){ return { sku: L.sku, need: L.need, picked: 0 }; })
+    };
+    shipState.mp = o.mp || '';
+    defaultPack();
+    render();
+  }
+  function openManual(no){
+    shipState.order = { key: '', no: no, manual: true, unknown: [], lines: [] };
+    shipState.mp = '';
+    defaultPack();
+    render();
+  }
+  function openOrderByNumber(raw){
+    var no = String(raw || '').trim();
+    if (!no) return;
+    var matches = Array.from(buildOrderIndex().values()).filter(function(o){ return o.no === no; });
+    var open = matches.filter(function(o){ return !shippedKeys.has(o.key); });
+    if (open.length === 1){ openOrder(open[0]); return; }
+    if (open.length > 1){ shipState.filter = no; render(); toast('Этот номер есть у нескольких маркетплейсов — выберите из списка', 'warn'); return; }
+    if (matches.length){ toast('Заказ ' + no + ' уже отгружен', 'bad'); return; }
+    if (confirm('Заказ «' + no + '» не найден в загруженных файлах. Собрать вручную?')) openManual(no);
+  }
+
+  function shipScan(raw){
+    var code = normBarcode(raw);
+    var ord = shipState.order;
+    if (!code || !ord) return;
+    var sku = barcodeIndex.get(code);
+    if (!sku || !items.has(sku)){ toast('Штрихкод не найден: ' + code, 'bad'); return; }
+    var L = ord.lines.find(function(l){ return l.sku === sku; });
+    if (!L){
+      if (!ord.manual && !confirm('Этого товара нет в заказе: ' + items.get(sku).name + '. Добавить в отгрузку?')) return;
+      L = { sku: sku, need: 0, picked: 0, extra: true };
+      ord.lines.push(L);
+    }
+    L.picked++;
+    render();
+  }
+
+  function renderShip(){
+    els.main.innerHTML = '';
+    var wrap = el('div', {class:'col'});
+    var ord = shipState.order;
+    if (ord) renderShipOrder(wrap, ord); else renderShipStart(wrap);
+    wrap.appendChild(renderShipHistory());
+    els.main.appendChild(wrap);
+    var f = document.getElementById(ord ? 'shipScanInput' : 'shipOrderInput');
+    if (f) f.focus();
+  }
+
+  function renderShipStart(wrap){
+    var card = el('div', {class:'card'});
+    card.appendChild(el('h2', {}, ['Отгрузка заказа']));
+    var inp = el('input', {type:'text', id:'shipOrderInput', class:'mono big-input', autocomplete:'off', placeholder:'Номер заказа / отправления', value: shipState.filter});
+    card.appendChild(inp);
+    card.appendChild(el('div', {class:'muted small', style:'margin-top:8px;'}, ['Введите номер или отсканируйте этикетку заказа и нажмите Enter. Заказы берутся из файлов на вкладке «Заказы»; если номера там нет, заказ можно собрать вручную.']));
+    wrap.appendChild(card);
+    var listCard = el('div', {class:'card'});
+    var holder = el('div', {});
+    listCard.appendChild(holder);
+    wrap.appendChild(listCard);
+    renderOpenOrders(holder);
+    inp.addEventListener('input', function(){ shipState.filter = this.value; renderOpenOrders(holder); });
+    inp.addEventListener('keydown', function(e){ if (e.key === 'Enter'){ e.preventDefault(); openOrderByNumber(inp.value); } });
+  }
+
+  function renderOpenOrders(holder){
+    holder.innerHTML = '';
+    var q = shipState.filter.trim().toLowerCase();
+    var all = Array.from(buildOrderIndex().values()).filter(function(o){ return !shippedKeys.has(o.key); });
+    var shown = all.filter(function(o){ return !q || o.no.toLowerCase().indexOf(q) >= 0; });
+    holder.appendChild(el('h2', {}, ['Заказы к сборке · ' + fmtInt(shown.length) + (q ? ' из ' + fmtInt(all.length) : '')]));
+    if (!all.length){
+      holder.appendChild(el('div', {class:'empty-state'}, [el('span', {class:'big-ic'}, ['🧾']), 'Нет заказов к сборке.', el('br'), 'Загрузите файл с заказами на вкладке «Заказы».']));
+      return;
+    }
+    shown.slice(0, 40).forEach(function(o){
+      var units = 0;
+      o.lines.forEach(function(L){ units += L.need; });
+      holder.appendChild(el('div', {class:'loc-list-row', onclick:function(){ openOrder(o); }}, [
+        el('span', {}, [el('span', {class:'tag'}, [MP_LABEL[o.mp] || '?']), ' ', el('b', {class:'mono'}, [o.no])]),
+        el('span', {class:'muted small'}, [o.lines.size + ' поз. · ' + units + ' шт' + (o.unknown.length ? ' · ⚠ вне номенклатуры: ' + o.unknown.length : '')])
+      ]));
+    });
+    if (shown.length > 40) holder.appendChild(el('div', {class:'muted small', style:'padding:8px 2px;'}, ['Показаны первые 40 — уточните номер.']));
+  }
+
+  function shipTotals(){
+    var ord = shipState.order, units = 0, lines = [];
+    ord.lines.forEach(function(l){ units += l.picked; });
+    var svc = tariffMap['fbs_' + shipState.mp];
+    if (svc){
+      var q = svc.basis === 'piece' ? units : 1;
+      lines.push({ name: svc.name, qty: q, amount: q * svc.price });
+    }
+    ['pack_bag', 'pack_box'].forEach(function(k){
+      var qn = shipState.pack[k] || 0;
+      if (qn > 0 && tariffMap[k]) lines.push({ name: tariffMap[k].name, qty: qn, amount: qn * tariffMap[k].price });
+    });
+    return { units: units, lines: lines, total: lines.reduce(function(a, l){ return a + l.amount; }, 0) };
+  }
+
+  function renderShipOrder(wrap, ord){
+    var head = el('div', {class:'card'});
+    head.appendChild(el('div', {class:'row', style:'justify-content:space-between;align-items:flex-start;'}, [
+      el('h2', {style:'margin:0;'}, ['Заказ № ' + ord.no]),
+      el('button', {class:'btn small', onclick:function(){ if (confirm('Закрыть заказ без отгрузки? Отсканированное будет сброшено.')){ shipState.order = null; render(); } }}, ['✕ Закрыть'])
+    ]));
+    if (ord.manual) head.appendChild(el('div', {class:'banner warn', style:'margin-top:8px;'}, ['Заказ не найден в загруженных файлах — собираем вручную: сканируйте товары, они добавятся в заказ.']));
+    var mpSel = el('select', {id:'shipMp', style:'margin-top:10px;'});
+    [['', 'Выберите маркетплейс…'], ['wb', 'WB'], ['ozon', 'Ozon'], ['ym', 'Яндекс-Маркет']].forEach(function(o){ mpSel.appendChild(el('option', {value:o[0]}, [o[1]])); });
+    mpSel.value = shipState.mp;
+    mpSel.addEventListener('change', function(){ shipState.mp = this.value; defaultPack(); render(); });
+    head.appendChild(mpSel);
+    wrap.appendChild(head);
+
+    var scanCard = el('div', {class:'card'});
+    scanCard.appendChild(el('h2', {}, ['Сканируйте товары']));
+    var sin = el('input', {type:'text', id:'shipScanInput', class:'mono big-input', autocomplete:'off', placeholder:'Наведите сканер на товар…'});
+    sin.addEventListener('keydown', function(e){
+      if (e.key === 'Enter'){ e.preventDefault(); var v = sin.value; sin.value = ''; shipScan(v); }
+    });
+    scanCard.appendChild(sin);
+    wrap.appendChild(scanCard);
+
+    var linesCard = el('div', {class:'card'});
+    var picked = 0, need = 0;
+    ord.lines.forEach(function(l){ picked += l.picked; need += l.need; });
+    linesCard.appendChild(el('h2', {}, ['Состав заказа' + (need ? ' · собрано ' + picked + ' из ' + need : (picked ? ' · ' + picked + ' шт' : ''))]));
+    var sorted = ord.lines.slice().sort(function(a, b){
+      var la = (items.get(a.sku) || {}).location, lb = (items.get(b.sku) || {}).location;
+      var na = la ? normLoc(la) : '', nb = lb ? normLoc(lb) : '';
+      if (!na && !nb) return 0;
+      if (!na) return 1;
+      if (!nb) return -1;
+      return na.localeCompare(nb, 'ru', { numeric: true });
+    });
+    if (!sorted.length) linesCard.appendChild(el('div', {class:'muted small'}, ['Пока пусто — отсканируйте первый товар.']));
+    sorted.forEach(function(L){
+      var it = items.get(L.sku) || { name: L.sku, location: '', stock: 0, article: '' };
+      var cls = 'ship-line' + (L.need > 0 && L.picked === L.need ? ' done' : '') + (L.need > 0 && L.picked > L.need ? ' over' : '');
+      var controls = [
+        el('button', {class:'icon-btn', onclick:function(){ L.picked = Math.max(0, L.picked - 1); render(); }}, ['−']),
+        el('span', {class:'mono ship-count'}, [L.picked + (L.need ? ' / ' + L.need : '')]),
+        el('button', {class:'icon-btn', onclick:function(){ L.picked++; render(); }}, ['+'])
+      ];
+      if (L.extra || ord.manual) controls.push(el('button', {class:'icon-btn', title:'Убрать из заказа', onclick:function(){ ord.lines = ord.lines.filter(function(x){ return x !== L; }); render(); }}, ['✕']));
+      linesCard.appendChild(el('div', {class:cls}, [
+        el('div', {class:'ship-main'}, [
+          el('div', {class:'ship-name'}, [it.name || L.sku]),
+          el('div', {class:'ship-meta'}, [
+            it.location ? el('span', {class:'loc-badge mono small'}, [it.location]) : el('span', {class:'muted small'}, ['место не указано']),
+            el('span', {class:'muted small mono'}, [it.article || L.sku]),
+            el('span', {class:'muted small'}, ['остаток ' + fmtInt(it.stock)])
+          ])
+        ]),
+        el('div', {class:'ship-qty'}, controls)
+      ]));
+    });
+    if (ord.unknown.length){
+      linesCard.appendChild(el('div', {class:'banner warn', style:'margin-top:8px;'}, ['Не найдено в номенклатуре (при отгрузке не списываются): ' + ord.unknown.map(function(u){ return u.ident + ' × ' + u.need; }).join(', ')]));
+    }
+    wrap.appendChild(linesCard);
+
+    var packCard = el('div', {class:'card'});
+    packCard.appendChild(el('h2', {}, ['Упаковка']));
+    ['pack_bag', 'pack_box'].forEach(function(k){
+      var t = tariffMap[k];
+      if (!t) return;
+      var inp = el('input', {type:'number', min:'0', value:String(shipState.pack[k] || 0), class:'mono'});
+      inp.addEventListener('change', function(){ shipState.pack[k] = Math.max(0, parseInt(this.value) || 0); render(); });
+      packCard.appendChild(el('div', {class:'pack-row'}, [
+        el('span', {}, [t.name + ' · ' + fmtMoney(t.price)]),
+        el('span', {class:'stepper'}, [
+          el('button', {class:'icon-btn', onclick:function(){ shipState.pack[k] = Math.max(0, (shipState.pack[k] || 0) - 1); render(); }}, ['−']),
+          inp,
+          el('button', {class:'icon-btn', onclick:function(){ shipState.pack[k] = (shipState.pack[k] || 0) + 1; render(); }}, ['+'])
+        ])
+      ]));
+    });
+    packCard.appendChild(el('div', {class:'muted small'}, ['Если упаковка клиента — оставьте 0.']));
+    var tt = shipTotals();
+    var pv = el('div', {style:'margin-top:12px;border-top:1px dashed var(--border);padding-top:10px;'});
+    pv.appendChild(el('div', {class:'loc-label'}, ['Будет начислено']));
+    if (!shipState.mp) pv.appendChild(el('div', {class:'muted small'}, ['Выберите маркетплейс — тогда посчитаем сборку.']));
+    tt.lines.forEach(function(l){
+      pv.appendChild(el('div', {class:'row', style:'justify-content:space-between;font-size:13px;margin-top:4px;'}, [
+        el('span', {}, [l.name + (l.qty !== 1 ? ' × ' + l.qty : '')]), el('span', {class:'mono'}, [fmtMoney(l.amount)])
+      ]));
+    });
+    pv.appendChild(el('div', {class:'row', style:'justify-content:space-between;margin-top:8px;font-weight:800;'}, [el('span', {}, ['Итого']), el('span', {class:'mono'}, [fmtMoney(tt.total)])]));
+    packCard.appendChild(pv);
+    packCard.appendChild(el('button', {class:'btn primary big', id:'shipGo', style:'width:100%;margin-top:14px;', onclick:doShip}, ['Отгрузить заказ']));
+    wrap.appendChild(packCard);
+  }
+
+  async function doShip(){
+    var ord = shipState.order;
+    if (!ord || shipState.busy) return;
+    if (!shipState.mp){ toast('Выберите маркетплейс', 'bad'); return; }
+    var lines = ord.lines.filter(function(l){ return l.picked > 0; });
+    if (!lines.length){ toast('Нет отсканированных товаров', 'bad'); return; }
+    var warns = [];
+    var incomplete = ord.lines.filter(function(l){ return l.need > 0 && l.picked < l.need; });
+    if (incomplete.length) warns.push('Собрано не всё: не хватает по ' + incomplete.length + ' поз.');
+    if (ord.lines.some(function(l){ return l.need > 0 && l.picked > l.need; })) warns.push('Отсканировано больше, чем в заказе.');
+    var shortLines = lines.filter(function(l){ return ((items.get(l.sku) || {}).stock || 0) < l.picked; });
+    if (shortLines.length) warns.push('Остатка не хватает по ' + shortLines.length + ' поз. — остаток станет 0.');
+    if (ord.unknown.length) warns.push('Позиции вне номенклатуры не будут списаны: ' + ord.unknown.length);
+    if (warns.length && !confirm(warns.join('\n') + '\n\nВсё равно отгрузить?')) return;
+    shipState.busy = true;
+    try{
+      var r = await apiFetch('/api/shipments', { method:'POST', body: JSON.stringify({
+        order_no: ord.no, marketplace: shipState.mp,
+        lines: lines.map(function(l){ return { sku: l.sku, qty: l.picked }; }),
+        packaging: ['pack_bag', 'pack_box'].map(function(k){ return { key: k, qty: shipState.pack[k] || 0 }; })
+      }) });
+      shippedKeys.add(shipState.mp + '|' + ord.no);
+      toast('Заказ ' + ord.no + ' отгружен · начислено ' + fmtMoney(r.total), 'ok');
+      shipState.order = null;
+      shipState.filter = '';
+      await refreshItems(true);
+      await loadShipOps();
+      render();
+    }catch(e){
+      if (e && /already_shipped/.test(e.message || '')){ shippedKeys.add(shipState.mp + '|' + ord.no); toast('Этот заказ уже отгружен', 'bad'); }
+      else toast('Не удалось отгрузить заказ', 'bad');
+    }finally{
+      shipState.busy = false;
+    }
+  }
+
+  function renderShipHistory(){
+    var card = el('div', {class:'card'});
+    card.appendChild(el('h2', {}, ['Последние отгрузки']));
+    if (!shipState.ops.length){ card.appendChild(el('div', {class:'muted small'}, ['Пока нет отгрузок.'])); return card; }
+    shipState.ops.forEach(function(o){
+      card.appendChild(el('div', {class:'loc-list-row', style: o.undone ? 'opacity:.5;text-decoration:line-through;' : ''}, [
+        el('span', {}, [el('span', {class:'tag'}, [MP_LABEL[o.marketplace] || o.marketplace]), ' ', el('b', {class:'mono'}, [o.ref]), ' ',
+          el('span', {class:'muted small'}, [new Date(o.ts).toLocaleString('ru-RU', {day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit'})])]),
+        el('span', {class:'row', style:'gap:8px;'}, [
+          el('span', {class:'mono'}, [fmtMoney(o.total)]),
+          o.undone ? null : el('button', {class:'btn small', onclick:function(ev){ ev.stopPropagation(); undoOp(o.id, async function(){ await loadShipOps(); render(); }); }}, ['Отменить'])
+        ])
+      ]));
+    });
+    return card;
+  }
+
+  /* ================= LEDGER TAB (журнал начислений) ================= */
+  var ledger = { y: new Date().getFullYear(), m: new Date().getMonth(), service: '', q: '', limit: 200, seq: 0 };
+
+  function ledgerRange(){
+    return { from: new Date(ledger.y, ledger.m, 1).toISOString(), to: new Date(ledger.y, ledger.m + 1, 1).toISOString() };
+  }
+  function rangeQS(){ var r = ledgerRange(); return 'from=' + encodeURIComponent(r.from) + '&to=' + encodeURIComponent(r.to); }
+  function monthLabel(y, m){
+    var s = new Date(y, m, 1).toLocaleDateString('ru-RU', { month: 'long', year: 'numeric' }).replace(/\s*г\.?$/, '');
+    return s.charAt(0).toUpperCase() + s.slice(1);
+  }
+  function shiftMonth(d){
+    var dt = new Date(ledger.y, ledger.m + d, 1);
+    ledger.y = dt.getFullYear(); ledger.m = dt.getMonth(); ledger.limit = 200;
+    render();
+  }
+
+  function renderLedger(){
+    els.main.innerHTML = '';
+    var wrap = el('div', {class:'col'});
+
+    wrap.appendChild(el('div', {class:'card row', style:'justify-content:space-between;'}, [
+      el('button', {class:'icon-btn', id:'ledPrev', onclick:function(){ shiftMonth(-1); }}, ['◀']),
+      el('div', {style:'text-align:center;'}, [
+        el('div', {style:'font-weight:800;font-size:17px;', id:'ledMonth'}, [monthLabel(ledger.y, ledger.m)]),
+        el('div', {class:'muted small'}, [who ? 'Склад: ' + who.name : ''])
+      ]),
+      el('button', {class:'icon-btn', id:'ledNext', onclick:function(){ shiftMonth(1); }}, ['▶'])
+    ]));
+
+    wrap.appendChild(el('div', {class:'card', id:'ledSummary'}, [el('div', {class:'muted small'}, ['Загрузка…'])]));
+
+    var det = el('div', {class:'card'});
+    det.appendChild(el('h2', {}, ['Детализация']));
+    var filt = el('div', {class:'row', style:'margin-bottom:10px;flex-wrap:wrap;'});
+    var svcSel = el('select', {id:'ledService', style:'flex:1;min-width:150px;'});
+    svcSel.appendChild(el('option', {value:''}, ['Все услуги']));
+    tariff.forEach(function(t){ svcSel.appendChild(el('option', {value:t.key}, [t.name])); });
+    svcSel.appendChild(el('option', {value:'__other'}, ['Другие (вписанные вручную)']));
+    svcSel.value = ledger.service;
+    svcSel.addEventListener('change', function(){ ledger.service = this.value; ledger.limit = 200; loadLedgerDetail(); });
+    var qIn = el('input', {type:'search', id:'ledQ', placeholder:'Поиск: заказ, товар, SKU…', value: ledger.q, style:'flex:2;min-width:150px;'});
+    var qTimer = null;
+    qIn.addEventListener('input', function(){
+      var v = this.value;
+      clearTimeout(qTimer);
+      qTimer = setTimeout(function(){ ledger.q = v; ledger.limit = 200; loadLedgerDetail(); }, 300);
+    });
+    filt.appendChild(svcSel); filt.appendChild(qIn);
+    det.appendChild(filt);
+    det.appendChild(el('div', {id:'ledDetail'}, [el('div', {class:'muted small'}, ['Загрузка…'])]));
+    det.appendChild(el('button', {class:'btn primary', id:'ledExport', style:'margin-top:12px;width:100%;', onclick:exportLedger}, ['Скачать отчёт за месяц (.xlsx)']));
+    wrap.appendChild(det);
+
+    var manual = el('details', {class:'batch'});
+    manual.appendChild(el('summary', {}, [el('b', {}, ['Добавить начисление вручную']), el('span', {class:'muted small'}, ['забор груза, хранение, доставка до СЦ…'])]));
+    var mbody = el('div', {class:'batch-body', id:'ledManual'});
+    manual.appendChild(mbody);
+    wrap.appendChild(manual);
+
+    var tar = el('details', {class:'batch'});
+    tar.appendChild(el('summary', {}, [el('b', {}, ['Тариф (цены услуг)']), el('span', {class:'muted small'}, [tariff.length + ' услуг'])]));
+    var tbody = el('div', {class:'batch-body', id:'ledTariff'});
+    tar.appendChild(tbody);
+    wrap.appendChild(tar);
+
+    els.main.appendChild(wrap);
+    buildManualForm(mbody);
+    buildTariffEditor(tbody);
+    loadLedgerSummary();
+    loadLedgerDetail();
+  }
+
+  async function loadLedgerSummary(){
+    var box = document.getElementById('ledSummary');
+    if (!box) return;
+    try{
+      var s = await apiFetch('/api/charges/summary?' + rangeQS());
+      box = document.getElementById('ledSummary');
+      if (!box) return;
+      box.innerHTML = '';
+      box.appendChild(el('div', {class:'row', style:'justify-content:space-between;align-items:baseline;'}, [
+        el('h2', {style:'margin:0;'}, ['Итого за месяц']),
+        el('div', {class:'big-money mono', id:'ledTotal'}, [fmtMoney(s.total)])
+      ]));
+      if (!s.rows.length){
+        box.appendChild(el('div', {class:'muted small', style:'margin-top:8px;'}, ['Начислений за этот месяц нет.']));
+        return;
+      }
+      var table = el('table', {class:'data sum-table', style:'margin-top:10px;'});
+      table.appendChild(el('thead', {}, [el('tr', {}, [el('th', {}, ['Услуга']), el('th', {style:'text-align:right;'}, ['Кол-во']), el('th', {style:'text-align:right;'}, ['Сумма'])])]));
+      var tb = el('tbody');
+      s.rows.forEach(function(r){
+        tb.appendChild(el('tr', {}, [
+          el('td', {}, [r.serviceName]),
+          el('td', {class:'num-cell'}, [fmtQty(r.qty) + ' ' + (r.unit || '')]),
+          el('td', {class:'num-cell' + (r.amount < 0 ? ' neg' : '')}, [fmtMoney(r.amount)])
+        ]));
+      });
+      table.appendChild(tb);
+      box.appendChild(el('div', {class:'tbl-scroll'}, [table]));
+    }catch(e){
+      if (box) box.innerHTML = '<div class="muted small">Не удалось загрузить итоги</div>';
+    }
+  }
+
+  async function loadLedgerDetail(){
+    var mySeq = ++ledger.seq;
+    var holder = document.getElementById('ledDetail');
+    if (!holder) return;
+    var qs = rangeQS() + '&limit=' + ledger.limit;
+    if (ledger.service) qs += '&service=' + encodeURIComponent(ledger.service);
+    if (ledger.q) qs += '&q=' + encodeURIComponent(ledger.q);
+    try{
+      var d = await apiFetch('/api/charges?' + qs);
+      if (mySeq !== ledger.seq) return;
+      holder = document.getElementById('ledDetail');
+      if (!holder) return;
+      holder.innerHTML = '';
+      if (!d.rows.length){ holder.appendChild(el('div', {class:'muted small'}, ['Начислений не найдено.'])); return; }
+      var table = el('table', {class:'data'});
+      table.appendChild(el('thead', {}, [el('tr', {}, ['Дата', 'Услуга', 'Заказ / товар', 'Кол-во', 'Цена', 'Сумма', ''].map(function(h){ return el('th', {}, [h]); }))]));
+      var tb = el('tbody');
+      d.rows.forEach(function(c){
+        var refTxt = c.refType === 'order' ? ('Заказ ' + c.ref) : (c.refType === 'item' ? (c.itemName || c.sku) : '—');
+        var act = (c.refType === 'manual' && !c.stornoed && !c.stornoOf)
+          ? el('button', {class:'btn small', title:'Отменить начисление', onclick:function(){ stornoCharge(c.id); }}, ['✕'])
+          : '';
+        tb.appendChild(el('tr', {class: c.stornoed ? 'struck' : ''}, [
+          el('td', {class:'small', style:'white-space:nowrap;'}, [new Date(c.ts).toLocaleString('ru-RU', {day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit'})]),
+          el('td', {}, [c.serviceName + (c.marketplace ? ' · ' + (MP_LABEL[c.marketplace] || c.marketplace) : ''),
+            c.comment ? el('div', {class:'muted small'}, [c.comment]) : null]),
+          el('td', {}, [refTxt]),
+          el('td', {class:'num-cell'}, [fmtQty(c.qty) + ' ' + (c.unit || '')]),
+          el('td', {class:'num-cell'}, [fmtMoney(c.unitPrice)]),
+          el('td', {class:'num-cell' + (c.amount < 0 ? ' neg' : '')}, [fmtMoney(c.amount)]),
+          el('td', {}, [act])
+        ]));
+      });
+      table.appendChild(tb);
+      holder.appendChild(el('div', {class:'tbl-scroll'}, [table]));
+      holder.appendChild(el('div', {class:'muted small', style:'margin-top:6px;'}, ['Показано ' + d.rows.length + ' из ' + d.count + ' · сумма по фильтру: ' + fmtMoney(d.total)]));
+      if (d.count > d.rows.length){
+        holder.appendChild(el('button', {class:'btn small', style:'margin-top:8px;', onclick:function(){ ledger.limit += 300; loadLedgerDetail(); }}, ['Показать ещё']));
+      }
+    }catch(e){
+      if (mySeq === ledger.seq && holder) holder.innerHTML = '<div class="muted small">Не удалось загрузить журнал</div>';
+    }
+  }
+
+  async function stornoCharge(id){
+    if (!confirm('Отменить это начисление? В журнале появится отменяющая строка.')) return;
+    try{
+      await apiFetch('/api/charges/' + id + '/storno', { method:'POST' });
+      toast('Начисление отменено', 'ok');
+      loadLedgerSummary(); loadLedgerDetail();
+    }catch(e){ toast('Не удалось отменить начисление', 'bad'); }
+  }
+
+  function buildManualForm(box){
+    box.innerHTML = '';
+    var sel = el('select', {id:'mcService'});
+    tariff.filter(function(t){ return t.mode === 'manual'; }).forEach(function(t){
+      sel.appendChild(el('option', {value:t.key}, [t.name + ' — ' + fmtMoney(t.price) + ' / ' + t.unit]));
+    });
+    sel.appendChild(el('option', {value:'__custom'}, ['Другая услуга (вписать вручную)…']));
+    var qty = el('input', {type:'number', min:'0', step:'any', id:'mcQty', placeholder:'Количество', style:'margin-top:8px;'});
+    var hint = el('div', {class:'muted small', id:'mcHint', style:'margin-top:6px;'});
+    var custom = el('div', {id:'mcCustom', style:'display:none;margin-top:8px;'});
+    var cName = el('input', {type:'text', id:'mcName', placeholder:'Название услуги', style:'margin-bottom:8px;'});
+    var cUnit = el('input', {type:'text', id:'mcUnit', placeholder:'Единица (шт, паллета, час…)', style:'margin-bottom:8px;'});
+    var cPrice = el('input', {type:'number', min:'0', step:'any', id:'mcPrice', placeholder:'Цена за единицу, ₽'});
+    custom.appendChild(cName); custom.appendChild(cUnit); custom.appendChild(cPrice);
+    var comment = el('input', {type:'text', id:'mcComment', placeholder:'Комментарий (необязательно)', style:'margin-top:8px;'});
+    var date = el('input', {type:'date', id:'mcDate', style:'margin-top:8px;'});
+    function updHint(){
+      var q = parseFloat(String(qty.value).replace(',', '.')) || 0;
+      if (sel.value === '__custom'){
+        var p = parseFloat(String(cPrice.value).replace(',', '.')) || 0;
+        hint.textContent = 'Сумма: ' + fmtMoney(q * p);
+      } else {
+        var t = tariffMap[sel.value];
+        hint.textContent = t ? ('Сумма: ' + fmtQty(q) + ' × ' + fmtMoney(t.price) + ' = ' + fmtMoney(q * t.price) + (t.unit === 'куб.м·день' ? ' (объём в куб.м × число дней)' : '')) : '';
+      }
+    }
+    sel.addEventListener('change', function(){ custom.style.display = sel.value === '__custom' ? 'block' : 'none'; updHint(); });
+    qty.addEventListener('input', updHint); cPrice.addEventListener('input', updHint);
+    var go = el('button', {class:'btn primary', id:'mcGo', style:'width:100%;margin-top:12px;', onclick:async function(){
+      var q = parseFloat(String(qty.value).replace(',', '.'));
+      if (!(q > 0)){ toast('Укажите количество', 'bad'); return; }
+      var body = { qty: q, comment: comment.value.trim() };
+      if (sel.value === '__custom'){
+        var pr = parseFloat(String(cPrice.value).replace(',', '.'));
+        if (!cName.value.trim() || !(pr >= 0)){ toast('Укажите название и цену услуги', 'bad'); return; }
+        body.name = cName.value.trim(); body.unit = cUnit.value.trim(); body.unit_price = pr;
+      } else {
+        body.service_key = sel.value;
+      }
+      if (date.value) body.ts = new Date(date.value + 'T12:00:00').toISOString();
+      try{
+        await apiFetch('/api/charges/manual', { method:'POST', body: JSON.stringify(body) });
+        toast('Начисление добавлено', 'ok');
+        qty.value = ''; comment.value = ''; updHint();
+        loadLedgerSummary(); loadLedgerDetail();
+      }catch(e){ toast('Не удалось добавить начисление', 'bad'); }
+    }}, ['Добавить начисление']);
+    box.appendChild(el('label', {}, ['Услуга']));
+    box.appendChild(sel); box.appendChild(qty); box.appendChild(hint); box.appendChild(custom);
+    box.appendChild(comment);
+    box.appendChild(el('label', {style:'display:block;margin-top:8px;'}, ['Дата (если не сегодня)']));
+    box.appendChild(date); box.appendChild(go);
+    updHint();
+  }
+
+  function buildTariffEditor(box){
+    box.innerHTML = '';
+    box.appendChild(el('div', {class:'muted small', style:'margin-bottom:8px;'}, ['Новая цена действует на операции с этого момента. Уже записанные начисления не пересчитываются.']));
+    var table = el('table', {class:'data'});
+    table.appendChild(el('thead', {}, [el('tr', {}, ['Услуга', 'Цена, ₽', 'Ед.'].map(function(h){ return el('th', {}, [h]); }))]));
+    var tb = el('tbody');
+    tariff.forEach(function(t){
+      var inp = el('input', {type:'number', min:'0', step:'any', value:String(t.price), class:'mono', 'data-key':t.key, style:'width:84px;'});
+      var nameCell = [t.name];
+      if (t.note) nameCell.push(el('div', {class:'muted small'}, [t.note]));
+      if (t.key.indexOf('fbs_') === 0){
+        var bs = el('select', {'data-basis':t.key, style:'margin-top:4px;'});
+        bs.appendChild(el('option', {value:'order'}, ['за заказ']));
+        bs.appendChild(el('option', {value:'piece'}, ['за каждую штуку']));
+        bs.value = t.basis || 'order';
+        nameCell.push(bs);
+      }
+      tb.appendChild(el('tr', {}, [el('td', {}, nameCell), el('td', {}, [inp]), el('td', {class:'muted small'}, [t.unit])]));
+    });
+    table.appendChild(tb);
+    box.appendChild(el('div', {class:'tbl-scroll'}, [table]));
+    box.appendChild(el('button', {class:'btn primary', id:'tariffSave', style:'width:100%;margin-top:10px;', onclick:async function(){
+      var itemsOut = [];
+      var bad = false;
+      Array.prototype.forEach.call(box.querySelectorAll('input[data-key]'), function(i){
+        var p = parseFloat(String(i.value).replace(',', '.'));
+        if (!(p >= 0)){ bad = true; return; }
+        var o = { key: i.getAttribute('data-key'), price: p };
+        var b = box.querySelector('select[data-basis="' + o.key + '"]');
+        if (b) o.basis = b.value;
+        itemsOut.push(o);
+      });
+      if (bad){ toast('Проверьте цены: нужны числа от 0', 'bad'); return; }
+      try{
+        tariff = await apiFetch('/api/tariff', { method:'PUT', body: JSON.stringify({ items: itemsOut }) });
+        tariffMap = {}; tariff.forEach(function(t){ tariffMap[t.key] = t; });
+        toast('Тариф сохранён', 'ok');
+        buildTariffEditor(box);
+        var mb = document.getElementById('ledManual'); if (mb) buildManualForm(mb);
+      }catch(e){ toast('Не удалось сохранить тариф', 'bad'); }
+    }}, ['Сохранить тариф']));
+  }
+
+  async function exportLedger(){
+    try{
+      var qs = rangeQS();
+      var s = await apiFetch('/api/charges/summary?' + qs);
+      var d = await apiFetch('/api/charges?' + qs + '&limit=50000');
+      var a1 = [['Склад', who ? who.name : ''], ['Период', monthLabel(ledger.y, ledger.m)], [], ['Услуга', 'Кол-во', 'Ед.', 'Сумма, ₽']];
+      s.rows.forEach(function(r){ a1.push([r.serviceName, r.qty, r.unit, r.amount]); });
+      a1.push([]); a1.push(['ИТОГО', '', '', s.total]);
+      var a2 = [['Дата', 'Услуга', 'Маркетплейс', 'Заказ / товар', 'Кол-во', 'Ед.', 'Цена, ₽', 'Сумма, ₽', 'Комментарий']];
+      d.rows.slice().reverse().forEach(function(c){
+        a2.push([new Date(c.ts).toLocaleString('ru-RU'), c.serviceName, MP_LABEL[c.marketplace] || '',
+          c.refType === 'order' ? c.ref : (c.itemName || c.sku || ''), c.qty, c.unit, c.unitPrice, c.amount, c.comment || '']);
+      });
+      var wb = XLSX.utils.book_new();
+      var w1 = XLSX.utils.aoa_to_sheet(a1); w1['!cols'] = [{wch:58}, {wch:12}, {wch:12}, {wch:14}];
+      var w2 = XLSX.utils.aoa_to_sheet(a2); w2['!cols'] = [{wch:20}, {wch:50}, {wch:14}, {wch:40}, {wch:9}, {wch:10}, {wch:10}, {wch:12}, {wch:30}];
+      XLSX.utils.book_append_sheet(wb, w1, 'Итоги');
+      XLSX.utils.book_append_sheet(wb, w2, 'Детализация');
+      var out = XLSX.write(wb, { type:'array', bookType:'xlsx' });
+      downloadBlob(new Blob([out], { type:'application/octet-stream' }), 'Nachisleniya_' + (who ? who.city : 'sklad') + '_' + ledger.y + '-' + pad2(ledger.m + 1) + '.xlsx');
+    }catch(e){ toast('Не удалось сформировать файл', 'bad'); }
   }
 
   /* ---------------- boot ---------------- */

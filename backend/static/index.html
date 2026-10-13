@@ -1019,8 +1019,9 @@
       rawParts.forEach(function(p){ tokens = tokens.concat(splitBarcodes(p)); });
       var ozn = tokens.find(function(t){ return t.toUpperCase().indexOf('OZN')===0; }) || '';
       var b2 = tokens.find(function(t){ return t.toUpperCase().indexOf('OZN')!==0; }) || '';
-      if (sku==null && !ozn && !b2) return;
-      var skuStr = safeId(sku!=null ? String(sku).trim() : ('BC-' + (ozn||b2)));
+      var skuRaw = sku!=null ? String(sku).trim() : '';
+      if (!skuRaw && !ozn && !b2) return;
+      var skuStr = safeId(skuRaw ? skuRaw : ('BC-' + (ozn||b2)));
       if (!skuStr) return;
       toWrite.push({ sku: skuStr, article: article!=null?String(article).trim():'', name: name!=null?String(name).trim():'', barcodeOzn: ozn, barcode2: b2 });
     });

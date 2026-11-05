@@ -12,7 +12,7 @@ services:
       - WAREHOUSES=${WAREHOUSES:-}
       # Ключи только для чтения для выгрузки остатков в Google Таблицу, формат  id:ключ;id2:ключ2
       # Пример: ivanovo:длинный-случайный-ключ
-      - EXPORT_KEYS=${EXPORT_KEYS:-}
+      - EXPORT_KEYS=${EXPORT_KEYS_V2:-}
     volumes:
       - repairkit_data:/app/data
 

@@ -1,0 +1,20 @@
+services:
+  repairkit-sklad:
+    build: ./backend
+    restart: unless-stopped
+    expose:
+      - "8000"
+    environment:
+      # Ключ склада Иваново (как раньше).
+      - APP_API_KEY=${APP_API_KEY:-}
+      # Дополнительные склады-города, формат  id:Название:ключ;id2:Название2:ключ2
+      # Пример: spb:Санкт-Петербург:длинный-случайный-ключ
+      - WAREHOUSES=${WAREHOUSES:-}
+      # Ключи только для чтения для выгрузки остатков в Google Таблицу, формат  id:ключ;id2:ключ2
+      # Пример: ivanovo:длинный-случайный-ключ
+      - EXPORT_KEYS=${EXPORT_KEYS:-}
+    volumes:
+      - repairkit_data:/app/data
+
+volumes:
+  repairkit_data:

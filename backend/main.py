@@ -89,6 +89,36 @@ def auth(x_api_key: Optional[str] = Header(default=None)) -> Ctx:
 
 
 # ---------------------------------------------------------------------------
+# Read-only export key (for the Google Sheets auto-export). It opens ONE endpoint
+# (/api/export/stock) and nothing else, so the full warehouse key never leaves the site.
+#   EXPORT_KEYS - format  id:ключ;id2:ключ2   (id = id of the warehouse, e.g. ivanovo)
+# ---------------------------------------------------------------------------
+
+def load_export_keys() -> dict:
+    keys = {}
+    for part in os.environ.get("EXPORT_KEYS", "").split(";"):
+        bits = [b.strip() for b in part.strip().split(":", 1)]
+        if len(bits) == 2:
+            cid, key = _safe_id(bits[0]), bits[1]
+            if cid in WAREHOUSES and key:
+                keys[cid] = key
+    return keys
+
+
+EXPORT_KEYS = load_export_keys()
+
+
+def export_auth(x_export_key: Optional[str] = Header(default=None)) -> Ctx:
+    if not EXPORT_KEYS:
+        raise HTTPException(status_code=404, detail="export_disabled")
+    given = (x_export_key or "").encode("utf-8")
+    for cid, key in EXPORT_KEYS.items():
+        if given and hmac.compare_digest(key.encode("utf-8"), given):
+            return Ctx(WAREHOUSES[cid])
+    raise HTTPException(status_code=401, detail="invalid_export_key")
+
+
+# ---------------------------------------------------------------------------
 # DB helpers
 # ---------------------------------------------------------------------------
 
@@ -364,6 +394,18 @@ class ManualChargeIn(BaseModel):
 @app.get("/api/whoami")
 def whoami(ctx: Ctx = Depends(auth)):
     return {"city": ctx.id, "name": ctx.name}
+
+
+@app.get("/api/export/stock")
+def export_stock(ctx: Ctx = Depends(export_auth)):
+    """Whole stock list as compact JSON for the Google Sheets script. Read-only, per warehouse."""
+    with get_conn(ctx.db) as conn:
+        rows = conn.execute("SELECT * FROM items ORDER BY name COLLATE NOCASE").fetchall()
+    header = ["Артикул", "SKU", "Наименование", "Штрихкод OZN", "Штрихкод 2...", "Место хранения", "Остаток"]
+    data = [[r["article"] or "", r["sku"], r["name"] or "", r["barcode_ozn"] or "", r["barcode2"] or "",
+             r["location"] or "", r["stock"] or 0] for r in rows]
+    return {"city": ctx.name, "generatedAt": _now_iso(), "header": header, "rows": data,
+            "count": len(data), "totalUnits": sum(x[6] for x in data)}
 
 
 # ---------------------------------------------------------------------------
